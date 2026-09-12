@@ -1,0 +1,159 @@
+{
+    "推送": {
+        "description": "每天什么时候、推到哪",
+        "type": "object",
+        "items": {
+            "push_time": {
+                "description": "推送时间（24 小时制 HH:MM）",
+                "type": "string",
+                "default": "09:00",
+                "hint": "每天到这个点生成并推送简报；插件重启会重新计时"
+            },
+            "catch_up_on_start": {
+                "description": "启动时补推",
+                "type": "bool",
+                "default": true,
+                "hint": "若启动时已过推送点、且今天还没推过，立刻补跑一次"
+            },
+            "push_targets": {
+                "description": "推送目标会话",
+                "type": "list",
+                "default": [],
+                "hint": "会话标识（umo）。在目标 QQ 私聊里发 /digest register 自动写入，一般不用手填"
+            },
+            "max_digest_chars": {
+                "description": "简报最大字数",
+                "type": "int",
+                "default": 3500,
+                "hint": "超出直接截断（QQ 单条消息有长度上限）"
+            }
+        }
+    },
+    "天气": {
+        "description": "今日天气（数据源 wttr.in，无需密钥）",
+        "type": "object",
+        "items": {
+            "weather_enabled": {
+                "description": "启用天气",
+                "type": "bool",
+                "default": true
+            },
+            "weather_city": {
+                "description": "城市",
+                "type": "string",
+                "default": "Chongqing",
+                "hint": "wttr.in 用英文名或拼音最稳，例如 Chongqing"
+            }
+        }
+    },
+    "大模型": {
+        "description": "用哪个模型把原始通知整理成简报",
+        "type": "object",
+        "items": {
+            "llm_provider": {
+                "description": "聊天模型提供商",
+                "type": "string",
+                "default": "",
+                "_special": "select_provider",
+                "hint": "留空即跟随 AstrBot 的全局默认模型。只有当你不想让简报用默认模型（例如想换个更便宜的小模型）时才在这里指定"
+            },
+            "llm_max_items_per_cat": {
+                "description": "每类最多喂几条给模型",
+                "type": "int",
+                "default": 8,
+                "hint": "控制输入长度与费用；群消息按此值的两倍计"
+            },
+            "llm_timeout_seconds": {
+                "description": "模型调用超时（秒）",
+                "type": "int",
+                "default": 60,
+                "hint": "超时即降级为纯列表，不会让简报变空"
+            }
+        }
+    },
+    "抓取": {
+        "description": "网页通知抓取",
+        "type": "object",
+        "items": {
+            "request_timeout_seconds": {
+                "description": "单次请求超时（秒）",
+                "type": "int",
+                "default": 20
+            },
+            "max_items": {
+                "description": "每次最多保留多少条",
+                "type": "int",
+                "default": 80,
+                "hint": "所有来源合并后按时间倒序取前 N 条"
+            },
+            "enable_campus": {
+                "description": "抓校内通知",
+                "type": "bool",
+                "default": true
+            },
+            "enable_competition": {
+                "description": "抓校外竞赛",
+                "type": "bool",
+                "default": true
+            },
+            "fetch_body_campus": {
+                "description": "校内通知抓正文",
+                "type": "bool",
+                "default": true,
+                "hint": "「时间/地点/要求」通常只写在详情页正文里，建议开"
+            },
+            "fetch_body_competition": {
+                "description": "竞赛通知抓正文",
+                "type": "bool",
+                "default": false,
+                "hint": "竞赛页正文往往很长，开启会明显拖慢速度"
+            }
+        }
+    },
+    "安全": {
+        "description": "谁能指挥这个机器人、它会往哪发",
+        "type": "object",
+        "items": {
+            "command_allow_from": {
+                "description": "允许使用 /digest 指令的 QQ 号",
+                "type": "list",
+                "default": [],
+                "hint": "填你自己的 QQ 号。只有列表里的 QQ 发指令才有反应，其他人发什么都不回（静默）。⚠️ 留空 = 谁都不能用，不是「不设限」——默认锁死是为了防止别人装完忘配就把 /digest now 对外开放"
+            }
+        }
+    },
+    "群消息": {
+        "description": "采集 QQ 群消息并并入简报",
+        "type": "object",
+        "items": {
+            "group_capture_enabled": {
+                "description": "采集群消息",
+                "type": "bool",
+                "default": true
+            },
+            "group_capture_hours": {
+                "description": "采集最近多少小时",
+                "type": "int",
+                "default": 24
+            },
+            "group_max_buffer": {
+                "description": "缓冲上限",
+                "type": "int",
+                "default": 500,
+                "hint": "超出后丢最旧的"
+            },
+            "group_allow_from": {
+                "description": "只采集这些群的消息",
+                "type": "list",
+                "default": [],
+                "hint": "填群号。留空 = 机器人所在的每个群都抓；填了则只收列表里的群，其他群的消息一律不入库。前提是机器人已经能收到该群消息（被拉进群、群没禁言）"
+            },
+            "group_keywords": {
+                "description": "关键词过滤",
+                "type": "list",
+                "default": [],
+                "hint": "留空 = 全部都要；填了则只保留含任一关键词的消息。这是按「内容」筛，不区分群"
+            }
+        }
+    }
+}
