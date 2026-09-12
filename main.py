@@ -10,6 +10,7 @@
 import asyncio
 import importlib.util
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,13 @@ from weather import WeatherClient
 BODY_FETCH_CONCURRENCY = 5
 ZWSP = "​"  # aiocqhttp 会 strip 纯文本，用零宽空格把首尾空白钉住
 
+QUERY_RECENT_DAYS = 3
+"""公开查询只看最近几天的通知。
+
+查询走的是 dry_run，没有 seen_ids 基线，不过滤就等于把整站历史倒出来，
+几千字被 max_digest_chars 截成半截。按日期卡一个窗口，输出才像一份简报。
+"""
+
 
 def _flatten_config(config: Any) -> dict[str, Any]:
     """把分组配置摊平一层，让平铺读法能读到值。
@@ -77,7 +85,7 @@ def _flatten_config(config: Any) -> dict[str, Any]:
     "astrbot_plugin_cqu_daily_digest",
     "woaixiaoyouxi",
     "聚合重庆大学校内通知与校外竞赛，合并 QQ 群消息与天气，每天定时推送一份纯文本简报",
-    "0.1.1",
+    "0.1.2",
 )
 class CquDailyDigestPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any] | None = None):
@@ -89,6 +97,9 @@ class CquDailyDigestPlugin(Star):
         self._scheduler_task: asyncio.Task | None = None
         self._catchup_task: asyncio.Task | None = None
         self._run_lock = asyncio.Lock()
+        # 公开查询的冷却缓存：umo -> (取到的时刻, 简报文本)。
+        # 不写 KV 也不写 digest_last——digest_last 是「他那一份」，被群查询覆盖掉就乱了。
+        self._query_cache: dict[str, tuple[float, str]] = {}
 
         self._fetcher = NoticeFetcher(self.config)
         self._store = DigestStore(self.get_kv_data, self.put_kv_data)
@@ -132,9 +143,12 @@ class CquDailyDigestPlugin(Star):
             logger.warning("[简报] 没有推送目标，用 /digest register 在当前会话登记")
         if not self._cfg_list("command_allow_from", []):
             logger.warning(
-                "[简报] command_allow_from 是空的，/digest 指令对所有人都不响应。"
-                "要在 QQ 上用指令，请在插件配置里填上自己的 QQ 号"
+                "[简报] command_allow_from 是空的，管理指令（/digest now 之类）对谁都不响应。"
+                "要在 QQ 上用，请在插件配置里填上自己的 QQ 号"
             )
+        groups = self._cfg_list("command_allow_groups", [])
+        if groups:
+            logger.info(f"[简报] {len(groups)} 个群开放了公开查询：{', '.join(groups)}")
 
     # ── 调度 ────────────────────────────────────────────────────
 
@@ -191,7 +205,13 @@ class CquDailyDigestPlugin(Star):
         """统一返回值形状——调用方固定读这五个键，别各写各的 dict。"""
         return {"text": text, "new": new, "pushed": pushed, "seeded": seeded, "skipped": skipped}
 
-    async def _run_once(self, *, dry_run: bool = False) -> dict[str, Any]:
+    async def _run_once(
+        self,
+        *,
+        dry_run: bool = False,
+        recent_days: int | None = None,
+        with_group_messages: bool = True,
+    ) -> dict[str, Any]:
         """跑一次完整流程。
 
         已有一次在跑就直接跳过——两条流水线并发会读到同一份 seen_ids，
@@ -201,10 +221,20 @@ class CquDailyDigestPlugin(Star):
             logger.info("[简报] 已有一次运行在进行中，本次跳过")
             return self._result(skipped=True)
         async with self._run_lock:
-            return await self._run_pipeline(dry_run=dry_run)
+            return await self._run_pipeline(
+                dry_run=dry_run,
+                recent_days=recent_days,
+                with_group_messages=with_group_messages,
+            )
 
-    async def _run_pipeline(self, *, dry_run: bool = False) -> dict[str, Any]:
-        """跑一次完整流程。dry_run 不推送、不写 seen_ids（调试源用）。"""
+    async def _run_pipeline(
+        self,
+        *,
+        dry_run: bool = False,
+        recent_days: int | None = None,
+        with_group_messages: bool = True,
+    ) -> dict[str, Any]:
+        """跑一次完整流程。dry_run 不推送、不写 seen_ids（调试源 / 公开查询用）。"""
         categories = self._enabled_categories()
         notices = await self._fetcher.fetch_notices(categories=categories) if categories else []
 
@@ -217,12 +247,18 @@ class CquDailyDigestPlugin(Star):
         else:
             fresh = [item for item in notices if item["id"] not in seen]
 
+        if recent_days:
+            fresh = self._within_days(fresh, recent_days)
+
         await self._fill_bodies(fresh)
-        group_messages = (
-            await self._collector.peek_recent()
-            if dry_run
-            else await self._collector.consume_recent()
-        )
+        if not with_group_messages:
+            group_messages: list[dict[str, Any]] = []
+        else:
+            group_messages = (
+                await self._collector.peek_recent()
+                if dry_run
+                else await self._collector.consume_recent()
+            )
 
         text = await self._digester.build(
             self.context,
@@ -276,6 +312,20 @@ class CquDailyDigestPlugin(Star):
         return False
 
     @staticmethod
+    def _within_days(notices: list[Notice], days: int) -> list[Notice]:
+        """只留最近 N 天的条目。
+
+        日期没解析出来的条目 published_at 是「抓取时刻」，天然落在窗口内，
+        不会因为站点没写日期就被误杀。
+        """
+        cutoff = datetime.now(CHINA_TZ) - timedelta(days=days)
+        return [
+            item
+            for item in notices
+            if item.get("published_at") is None or item["published_at"] >= cutoff
+        ]
+
+    @staticmethod
     def _group_by_category(notices: list[Notice]) -> dict[str, list[Notice]]:
         grouped: dict[str, list[Notice]] = {}
         for item in notices:
@@ -325,22 +375,88 @@ class CquDailyDigestPlugin(Star):
             logger.warning(f"[简报] 群消息入库失败：{exc}")
 
     # ── 指令 ────────────────────────────────────────────────────
+    #
+    # 用一条扁平指令 /digest 收所有子指令，不用 command_group：指令组的匹配器
+    # 在「只发 /digest、不带子指令」时会抛 ValueError，AstrBot 接住后**往会话里
+    # 回一条报错**（waking_check/stage.py 的 except 分支）——那是在任何权限判断
+    # 之前发生的，白名单外的人照样会收到回复，静默就破了。扁平指令自己分派，
+    # 权限全在 _deny 里收口。
 
-    @filter.command_group("digest")
-    def digest_group(self):
-        pass
+    @filter.command("digest")
+    async def digest_entry(self, event: AstrMessageEvent, sub: str = ""):
+        """每日简报：直接发 /digest 取一份，或跟 help/now/test/last 等子指令。"""
+        action = str(sub or "").strip().lower()
 
-    @digest_group.command("help")
-    async def digest_help(self, event: AstrMessageEvent):
+        if action in ("", "query"):
+            async for result in self._cmd_query(event):
+                yield result
+            return
+
+        handler = {
+            "help": self._cmd_help,
+            "now": self._cmd_now,
+            "test": self._cmd_test,
+            "last": self._cmd_last,
+            "sources": self._cmd_sources,
+            "register": self._cmd_register,
+            "unregister": self._cmd_unregister,
+            "targets": self._cmd_targets,
+        }.get(action)
+        if handler is None:
+            # 认不出的子指令：给说明。能走到这里说明已被授权，回一句不算冒泡。
+            if self._deny(event):
+                return
+            yield event.plain_result(self._help_text())
+            return
+
+        async for result in handler(event):
+            yield result
+
+    async def _cmd_query(self, event: AstrMessageEvent):
+        """公开查询：现算一份给当前会话。
+
+        走 dry_run——不推送、不写 seen_ids、不消费群缓冲，所以外人刷它不会
+        动到他的增量基线。按 umo 记冷却，冷却期内直接回上一次算好的那份，
+        避免有人连点把 API 额度烧穿。
+        """
+        if self._deny(event):
+            return
+
+        key = str(getattr(event, "unified_msg_origin", "") or "")
+        cooldown = self._cfg_int("query_cooldown_seconds", 120)
+        cached = self._query_cache.get(key)
+        if cached and cooldown > 0:
+            waited = time.monotonic() - cached[0]
+            if waited < cooldown:
+                yield event.plain_result(
+                    f"距上次生成才 {int(waited)} 秒，先看这一份"
+                    f"（{cooldown} 秒后可再算）：\n\n{cached[1]}"
+                )
+                return
+
+        result = await self._run_once(
+            dry_run=True,
+            recent_days=QUERY_RECENT_DAYS,
+            with_group_messages=False,
+        )
+        if result["skipped"]:
+            yield event.plain_result("刚好在生成简报，稍等十几秒再来。")
+            return
+
+        text = result["text"] or "（什么都没抓到，可能是源还没配好）"
+        if cooldown > 0:
+            self._query_cache[key] = (time.monotonic(), text)
+        yield event.plain_result(text)
+
+    async def _cmd_help(self, event: AstrMessageEvent):
         """查看使用说明。"""
         if self._deny(event):
             return
         yield event.plain_result(self._help_text())
 
-    @digest_group.command("now")
-    async def digest_now(self, event: AstrMessageEvent):
+    async def _cmd_now(self, event: AstrMessageEvent):
         """立即跑一次完整流程并推送。"""
-        if self._deny(event):
+        if self._deny(event, admin_only=True):
             return
         result = await self._run_once()
         if result["skipped"]:
@@ -360,10 +476,9 @@ class CquDailyDigestPlugin(Star):
             return
         yield event.plain_result(f"已推送，本次新增 {result['new']} 条。")
 
-    @digest_group.command("test")
-    async def digest_test(self, event: AstrMessageEvent):
+    async def _cmd_test(self, event: AstrMessageEvent):
         """只看简报长什么样：抓取+渲染，但不推送、不写去重记录。"""
-        if self._deny(event):
+        if self._deny(event, admin_only=True):
             return
         result = await self._run_once(dry_run=True)
         if result["skipped"]:
@@ -371,18 +486,16 @@ class CquDailyDigestPlugin(Star):
             return
         yield event.plain_result(result["text"] or "（没有抓到任何内容，先检查源配置）")
 
-    @digest_group.command("last")
-    async def digest_last(self, event: AstrMessageEvent):
+    async def _cmd_last(self, event: AstrMessageEvent):
         """查看最近一次生成的简报原文。"""
-        if self._deny(event):
+        if self._deny(event, admin_only=True):
             return
         text = await self._store.get_last_digest()
         yield event.plain_result(text or "还没有生成过简报。")
 
-    @digest_group.command("sources")
-    async def digest_sources(self, event: AstrMessageEvent):
+    async def _cmd_sources(self, event: AstrMessageEvent):
         """列出所有信息源及其配置状态。"""
-        if self._deny(event):
+        if self._deny(event, admin_only=True):
             return
         lines = ["信息源：", *format_source_lines()]
         missing = unconfigured_keys()
@@ -390,10 +503,9 @@ class CquDailyDigestPlugin(Star):
             lines += ["", f"⚠️ 还没配 URL/selector：{', '.join(missing)}"]
         yield event.plain_result("\n".join(lines))
 
-    @digest_group.command("register")
-    async def digest_register(self, event: AstrMessageEvent):
-        """把当前会话登记为推送目标。"""
-        if self._deny(event):
+    async def _cmd_register(self, event: AstrMessageEvent):
+        """把当前会话登记为推送目标（私聊或群都行）。"""
+        if self._deny(event, admin_only=True):
             return
         umo = event.unified_msg_origin
         targets = self._push_targets()
@@ -404,10 +516,9 @@ class CquDailyDigestPlugin(Star):
         self._save_push_targets(targets)
         yield event.plain_result(f"已登记为推送目标：{umo}")
 
-    @digest_group.command("unregister")
-    async def digest_unregister(self, event: AstrMessageEvent):
+    async def _cmd_unregister(self, event: AstrMessageEvent):
         """取消当前会话的推送登记。"""
-        if self._deny(event):
+        if self._deny(event, admin_only=True):
             return
         umo = event.unified_msg_origin
         targets = self._push_targets()
@@ -418,10 +529,9 @@ class CquDailyDigestPlugin(Star):
         self._save_push_targets(targets)
         yield event.plain_result(f"已取消推送登记：{umo}")
 
-    @digest_group.command("targets")
-    async def digest_targets(self, event: AstrMessageEvent):
+    async def _cmd_targets(self, event: AstrMessageEvent):
         """列出全部推送目标。"""
-        if self._deny(event):
+        if self._deny(event, admin_only=True):
             return
         targets = self._push_targets()
         if not targets:
@@ -478,6 +588,12 @@ class CquDailyDigestPlugin(Star):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
+    def _cfg_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.config.get(key, default))
+        except (ValueError, TypeError):
+            return default
+
     def _cfg_list(self, key: str, default: list[str]) -> list[str]:
         """读字符串列表配置；类型不对就当空列表，别让脏配置炸掉整条流水线。"""
         value = self.config.get(key, default)
@@ -507,13 +623,43 @@ class CquDailyDigestPlugin(Star):
             return False
         return bool(sender) and sender in allowed
 
-    def _deny(self, event: AstrMessageEvent) -> bool:
-        """非白名单就吞掉这条消息。返回 True = 已拒绝，调用方直接 return。
+    def _is_group_query_allowed(self, event: AstrMessageEvent) -> bool:
+        """群名单里的群，任何人都可以查询。
+
+        跟 command_allow_from 一样，留空 = 谁都不能查（不是「不设限」）。
+        名单填的是**群号**，判的不是发送者——群里的人来来去去，按人管不过来。
+        """
+        allowed = self._cfg_list("command_allow_groups", [])
+        if not allowed:
+            return False
+        group_id = self._group_id(event)
+        return bool(group_id) and group_id in allowed
+
+    @staticmethod
+    def _group_id(event: Any) -> str:
+        """取群号；私聊或取不到就是空串（空串永远不会撞上名单）。"""
+        getter = getattr(event, "get_group_id", None)
+        if not callable(getter):
+            return ""
+        try:
+            return str(getter() or "").strip()
+        except Exception as exc:
+            logger.warning(f"[简报] 取群号失败：{exc}")
+            return ""
+
+    def _deny(self, event: AstrMessageEvent, *, admin_only: bool = False) -> bool:
+        """不在授权范围就吞掉这条消息。返回 True = 已拒绝，调用方直接 return。
+
+        授权范围分两级：
+        - 管理（command_allow_from 里的 QQ）：全部指令
+        - 查询（command_allow_groups 里的群，群内任何人）：只有 /digest query/help
 
         光「不回复」不够：消息会继续流向别的插件和 AstrBot 的 AI 对话，机器人
         照样会在群里说话。stop_event() 把它截在这儿。
         """
         if self._is_authorized(event):
+            return False
+        if not admin_only and self._is_group_query_allowed(event):
             return False
         stop = getattr(event, "stop_event", None)
         if callable(stop):
@@ -529,21 +675,23 @@ class CquDailyDigestPlugin(Star):
             [
                 "每日简报——使用说明",
                 "",
-                "用户指令：",
+                "任何人可用（限已开放的群）：",
+                "- /digest：现算一份发到本群（只含校内通知与竞赛）",
+                "- /digest query：同上",
                 "- /digest help：查看本说明",
-                "- /digest now：立即跑一次完整流程并推送",
-                "- /digest test：只看简报样式，不推送、不写去重",
-                "- /digest last：查看最近一次简报原文",
-                "- /digest sources：查看信息源配置状态",
                 "",
-                "会话登记：",
+                "仅管理员可用：",
+                "- /digest now：立即跑一次完整流程并推送",
+                "- /digest test：看完整简报（含群消息）长什么样，不推送、不写去重",
+                "- /digest last：查看最近一次推送的原文",
+                "- /digest sources：查看信息源配置状态",
                 "- /digest register：把当前会话登记为推送目标",
                 "- /digest unregister：取消当前会话的推送登记",
                 "- /digest targets：列出全部推送目标",
                 "",
-                "以上指令只认白名单里的 QQ（配置项 command_allow_from），",
-                "其他人发什么都不回应。简报只会主动发到登记过的会话，",
-                "不会往别的群发。",
+                "查询有冷却时间，同一个会话短时间内只会现算一次，",
+                "期内再来直接返回上一次的结果。简报只会主动发到登记过的",
+                "会话，不会自己往群里冒泡。",
                 "",
                 "推送时间与内容开关都在插件配置里改。简报只摘与在校学生",
                 "相关的条目（活动竞赛、评奖选课、宿舍食堂等），行政公文由",

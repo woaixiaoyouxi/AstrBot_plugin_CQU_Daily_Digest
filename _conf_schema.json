@@ -19,7 +19,7 @@
                 "description": "推送目标会话",
                 "type": "list",
                 "default": [],
-                "hint": "会话标识（umo）。在目标 QQ 私聊里发 /digest register 自动写入，一般不用手填"
+                "hint": "会话标识（umo），私聊和群都行：私聊形如 <平台ID>:FriendMessage:<QQ号>，群形如 <平台ID>:GroupMessage:<群号>，平台 ID 通常是 aiocqhttp。在目标会话里发 /digest register 自动写入，一般不用手填"
             },
             "max_digest_chars": {
                 "description": "简报最大字数",
@@ -111,14 +111,26 @@
         }
     },
     "安全": {
-        "description": "谁能指挥这个机器人、它会往哪发",
+        "description": "谁能指挥这个机器人、谁能来查",
         "type": "object",
         "items": {
             "command_allow_from": {
-                "description": "允许使用 /digest 指令的 QQ 号",
+                "description": "管理员 QQ 号（可用全部指令）",
                 "type": "list",
                 "default": [],
-                "hint": "填你自己的 QQ 号。只有列表里的 QQ 发指令才有反应，其他人发什么都不回（静默）。⚠️ 留空 = 谁都不能用，不是「不设限」——默认锁死是为了防止别人装完忘配就把 /digest now 对外开放"
+                "hint": "填你自己的 QQ 号。只有列表里的 QQ 能发 /digest now、register、last 这类管理指令，其他人发什么都不回（静默）。⚠️ 留空 = 谁都不能用，不是「不设限」——默认锁死是为了防止别人装完忘配就把 /digest now 对外开放"
+            },
+            "command_allow_groups": {
+                "description": "开放查询的群号",
+                "type": "list",
+                "default": [],
+                "hint": "填**群号**（不是 QQ 号）。名单里的群里任何人都能发 /digest 现算一份（只含校内通知与竞赛，不含群消息），但用不了管理指令，也不会被主动推送。⚠️ 留空 = 群里谁都不能查。想让自己私聊也能用，走上面的管理员名单"
+            },
+            "query_cooldown_seconds": {
+                "description": "查询冷却（秒）",
+                "type": "int",
+                "default": 120,
+                "hint": "同一个会话两次现算之间的最小间隔。冷却期内再发 /digest 直接返回上次算好的那份，不重复调用大模型。填 0 = 不限频（不建议：开放群里有连点就是烧你的额度）"
             }
         }
     },
