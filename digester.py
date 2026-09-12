@@ -13,6 +13,7 @@
 """
 
 import asyncio
+import re
 from typing import Any
 
 from astrbot.api import logger
@@ -21,6 +22,12 @@ from fetcher import CHINA_TZ, Notice
 from sources import category_title
 
 CATEGORY_ORDER = ("campus", "competition")
+
+SECTION_GAP = "\n\n\n\n"
+"""分类之间的空行——换行符+3 个空行。"""
+
+_HEADER_RE = re.compile(r"^【[^】]+】$")
+"""分类小标题的识别式，如「【校内通知】」。模型排版不可控，靠这个重新拼。"""
 
 SYSTEM_PROMPT = """你在为一名重庆大学计算机学院的本科生整理「每日简报」。
 
@@ -39,6 +46,9 @@ SYSTEM_PROMPT = """你在为一名重庆大学计算机学院的本科生整理�
 硬性要求：
 - 只依据用户提供的文本，禁止编造任何信息。原文没写的，一律写「未提及」。
 - 完全按给定的分类分组，不要新增、合并或改名分类。
+- 每个分类前面单独占一行写分类名，用【】括起来，只能是这三个：
+  【校内通知】、【竞赛】、【群消息】。分类之间不要自己加空行——
+  空行由程序统一排版，你只管写内容和分类名。
 - 全中文，纯文本，不要 Markdown 标记（不要 #、*、-、`）。
 - 每行只写一件事，不要展开成长段落。
 - 不要写开场白、结语、总结或任何评论。直接输出条目。
@@ -108,7 +118,7 @@ class Digester:
             # 绝不能退回 _fallback_render——那会把刚被筛掉的行政公文原样倒出来。
             logger.info("[简报] 模型没留下任何条目，按「今日无相关通知」处理")
             return self._truncate(f"{head}\n\n今日无与学生相关的新通知。")
-        return self._truncate(f"{head}\n\n{text}")
+        return self._truncate(f"{head}\n\n{self._space_sections(text)}")
 
     # ── Provider 选择 ───────────────────────────────────────────
 
@@ -186,6 +196,34 @@ class Digester:
             f"{data_block}"
         )
 
+    # ── 排版 ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _space_sections(text: str) -> str:
+        """把各分类之间的空行统一成三行。
+
+        模型吐出来的空行数每轮都不一样，指望它稳定排版不现实，所以把正文按
+        分类小标题切块，再用固定间距拼回去。找不到小标题（模型没照格式写）
+        就原样返回，不做猜测。
+        """
+        blocks: list[list[str]] = []
+        current: list[str] = []
+        for line in text.split("\n"):
+            if _HEADER_RE.match(line.strip()):
+                if current:
+                    blocks.append(current)
+                current = [line.strip()]
+            else:
+                current.append(line)
+        if current:
+            blocks.append(current)
+
+        if len(blocks) <= 1:
+            return text.strip()
+
+        rendered = ["\n".join(block).strip("\n") for block in blocks]
+        return SECTION_GAP.join(rendered)
+
     # ── 降级渲染 ────────────────────────────────────────────────
 
     def _fallback_render(
@@ -196,12 +234,14 @@ class Digester:
         group_messages: list[dict[str, Any]],
     ) -> str:
         lines = [self._header(date_str, weather)]
+        first_block = True
 
         for category in CATEGORY_ORDER:
             notices = notices_by_category.get(category) or []
             if not notices:
                 continue
-            lines.append("")
+            lines.extend([""] * (1 if first_block else 3))
+            first_block = False
             lines.append(f"【{category_title(category)}】")
             for index, item in enumerate(notices, 1):
                 lines.append(f"{index}. {item['title']}")
@@ -209,7 +249,8 @@ class Digester:
                 lines.append(f"   {item['link']}")
 
         if group_messages:
-            lines.append("")
+            lines.extend([""] * (1 if first_block else 3))
+            first_block = False
             lines.append("【群消息】")
             for index, message in enumerate(group_messages, 1):
                 lines.append(

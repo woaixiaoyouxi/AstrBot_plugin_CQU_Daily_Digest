@@ -54,16 +54,37 @@ BODY_FETCH_CONCURRENCY = 5
 ZWSP = "​"  # aiocqhttp 会 strip 纯文本，用零宽空格把首尾空白钉住
 
 
+def _flatten_config(config: Any) -> dict[str, Any]:
+    """把分组配置摊平一层，让平铺读法能读到值。
+
+    AstrBot 按 _conf_schema.json 里的「组」把配置存成 {组名: {键: 值}}，
+    但本插件各处都按平铺键读 config.get("key")——不摊平就永远读到 None，
+    再静默回落到默认值。command_allow_from 的默认值恰好是空列表（谁都不能用），
+    所以指令会被一声不吭地全部吞掉。
+    """
+    if not isinstance(config, dict):
+        return {}
+    flat: dict[str, Any] = {}
+    for key, value in config.items():
+        if isinstance(value, dict):
+            flat.update(value)
+        else:
+            flat[key] = value
+    return flat
+
+
 @register(
     "astrbot_plugin_cqu_daily_digest",
     "woaixiaoyouxi",
     "聚合重庆大学校内通知与校外竞赛，合并 QQ 群消息与天气，每天定时推送一份纯文本简报",
-    "0.1.0",
+    "0.1.1",
 )
 class CquDailyDigestPlugin(Star):
     def __init__(self, context: Context, config: dict[str, Any] | None = None):
         super().__init__(context)
-        self.config = config or {}
+        # 原始配置留着写回（分组形态，面板要照它渲染）；读取一律走摊平后的
+        self._raw_config: dict[str, Any] = config if isinstance(config, dict) else {}
+        self.config = _flatten_config(self._raw_config)
         self._stop_event = asyncio.Event()
         self._scheduler_task: asyncio.Task | None = None
         self._catchup_task: asyncio.Task | None = None
@@ -418,7 +439,12 @@ class CquDailyDigestPlugin(Star):
 
     def _save_push_targets(self, targets: list[str]) -> None:
         self.config["push_targets"] = targets
-        save = getattr(self.config, "save_config", None)
+        # 写回分组里的那份，否则面板上看不到新登记的会话
+        raw = self._raw_config
+        for value in raw.values():
+            if isinstance(value, dict) and "push_targets" in value:
+                value["push_targets"] = targets
+        save = getattr(raw, "save_config", None)
         if callable(save):
             try:
                 save()

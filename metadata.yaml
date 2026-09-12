@@ -1,6 +1,6 @@
 name: astrbot_plugin_cqu_daily_digest
 display_name: 每日简报（重庆大学）
 desc: 聚合重庆大学校内通知与校外竞赛，合并采集到的 QQ 群消息和今日天气，每天定时用大模型整理成一份纯文本简报，推送到指定的 QQ 会话。
-version: v0.1.0
+version: v0.1.1
 author: woaixiaoyouxi
 repo:
