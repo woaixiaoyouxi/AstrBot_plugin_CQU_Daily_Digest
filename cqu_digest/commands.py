@@ -8,6 +8,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.fetch.sources import format_source_lines, unconfigured_keys
 from cqu_digest.digest.entries import is_valid, split_entries
+from cqu_digest.push import ZWSP
 
 
 class CommandsMixin:
@@ -36,10 +37,7 @@ class CommandsMixin:
                     yield r
                 return
 
-        note, go = self._queue_notice()
-        if note:
-            yield event.plain_result(note)
-        if not go:
+        if not await self._ack_and_check_queue(event):
             return
 
         days = self._cfg_int("query_recent_days", 30)
@@ -71,16 +69,34 @@ class CommandsMixin:
         async for r in self._emit_digest(event, text, blocks=result.get("blocks")):
             yield r
 
-    def _queue_notice(self):
-        """返回 (要发给用户的提示, 还能不能继续跑)。没提示就是 ("", True)。"""
+    async def _ack_and_check_queue(self, event: AstrMessageEvent) -> bool:
+        """先回一句「已收到」，顺便报排队位置。返回还能不能继续跑。
+
+        ★ 用 send_message 直接发，不靠 yield —— 不确定 AstrBot 是不是逐条
+          发 generator 的 yield；靠 yield 的话提示可能和简报一起出现，那就白做了。
+        """
         ahead = self._queue_ahead()
-        if ahead <= 0:
-            return "", True
         limit = max(1, self._cfg_int("queue_limit", 3))
         if ahead > limit:
-            return ("排队的人太多了（前面 " + str(ahead) + " 个），过一会儿再来吧。", False)
-        return ("已收到请求，目前排队在第 " + str(ahead + 1) + " 位（前面还有 "
-                + str(ahead) + " 个在跑），请稍后…", True)
+            text = "排队的人太多了（前面 " + str(ahead) + " 个），过一会儿再来吧。"
+            go = False
+        elif ahead > 0:
+            text = ("已收到请求，目前排队在第 " + str(ahead + 1)
+                    + " 位（前面还有 " + str(ahead) + " 个在跑），请稍后…")
+            go = True
+        else:
+            text = "已收到请求，正在生成…"
+            go = True
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if umo:
+            try:
+                await self.context.send_message(
+                    umo, MessageChain().message(ZWSP + text + ZWSP)
+                )
+            except Exception as exc:                        # noqa: BLE001
+                logger.warning(f"[简报] 发「已收到」提示失败：{exc}")
+        return go
 
     async def _cmd_help(self, event: AstrMessageEvent):
         """查看使用说明。"""
@@ -92,10 +108,7 @@ class CommandsMixin:
         """立即跑一次完整流程并推送。"""
         if self._deny(event, admin_only=True):
             return
-        note, go = self._queue_notice()
-        if note:
-            yield event.plain_result(note)
-        if not go:
+        if not await self._ack_and_check_queue(event):
             return
 
         result = await self._run_once()
@@ -120,10 +133,7 @@ class CommandsMixin:
         """
         if self._deny(event, admin_only=True):
             return
-        note, go = self._queue_notice()
-        if note:
-            yield event.plain_result(note)
-        if not go:
+        if not await self._ack_and_check_queue(event):
             return
 
         # 全程不过库：不看条目库、不写条目库、也不插【即将截止】
@@ -158,10 +168,7 @@ class CommandsMixin:
         limit = self._cfg_int("no_due_expire_days", 30)
         valid = [r for r in entries.values() if is_valid(r, today, limit)]
 
-        note, go = self._queue_notice()
-        if note:
-            yield event.plain_result(note)
-        if not go:
+        if not await self._ack_and_check_queue(event):
             return
 
         # 顺便检测有没有新信息。走 only_new，且不插提醒（提醒下面自己插一次）
