@@ -7,7 +7,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.fetch.sources import format_source_lines, unconfigured_keys
-from cqu_digest.digest.entries import is_valid, split_entries
+from cqu_digest.digest.entries import is_valid, split_entries, to_records
 from cqu_digest.push import ZWSP
 
 
@@ -185,7 +185,7 @@ class CommandsMixin:
             # 新抓的那份解析成记录后并进来，避免出现两个同名分类
             parsed = split_entries(result["text"])
             if parsed:
-                merged = merged + self._to_records(parsed, [], today)
+                merged = merged + to_records(parsed, [], today)
 
         # 库大了不能一次全倒出来（节点数会超上限、退回纯文本）
         cap = self._cfg_int("query_all_max_items", 40)

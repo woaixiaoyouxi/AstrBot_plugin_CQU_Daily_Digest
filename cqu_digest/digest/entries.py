@@ -24,6 +24,14 @@
 """
 import re
 from datetime import datetime
+from hashlib import sha1
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # ★ 只在做类型检查时 import。运行时零依赖 ——
+    #   否则 entries 会连带依赖 fetch.engine（那里 import 了 httpx / bs4），
+    #   这个「纯数据转换」模块就没法单独跑测试了。
+    from cqu_digest.fetch.engine import Notice
 
 SEP_LINE = "——————————"
 HEADER_RE = re.compile(r"^【[^】]+】$")
@@ -116,6 +124,71 @@ def earliest_time(entry: dict) -> str:
     """
     dates = [t["date"] for t in entry.get("times", []) if t.get("date")]
     return min(dates) if dates else ""
+
+
+def to_records(parsed: list, notices: list, today: str) -> list:
+    """把 split_entries 的结果配上 id 和发布时间，变成可入库的记录。
+
+    ★ 这个函数原来住在 pipeline.py 里 —— 但它是纯数据转换（不碰 IO、不碰流程），
+      而 pipeline 的职责是流程编排。搬过来之后，
+      entries.py 就成了唯一做「文本 <-> 结构 <-> 入库记录」的地方。
+
+    id 从强到弱取：
+        ① 链接对得上某条抓取结果 -> 用它的 id 和 published_at
+        ② 对不上（群消息那条没有链接）-> 用 分类+标题 算一个稳定哈希，
+           这样同一条群消息下次抓到还是同一个 id，不会重复入库
+    标题匹配带一层「互相包含」兜底，因为模型可能微调标题措辞。
+    """
+    by_link = {}
+    by_title = {}
+    for item in notices:
+        link = str(item.get("link", "") or "").strip()
+        if link:
+            by_link[link] = item
+        title = str(item.get("title", "") or "").strip()
+        if title:
+            by_title.setdefault(title, item)
+
+    out = []
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        fields = entry.get("fields") or {}
+        link = str(fields.get("链接", "") or "").strip()
+        title = str(entry.get("title", "") or "").strip()
+        hit = by_link.get(link) if link else None
+        if hit is None and title:
+            hit = by_title.get(title)
+            if hit is None:
+                for key, item in by_title.items():
+                    if key and (key in title or title in key):
+                        hit = item
+                        break
+        if hit is not None:
+            rid = str(hit.get("id", "") or "")
+            published = hit.get("published_at")
+            if hasattr(published, "strftime"):
+                published = published.strftime("%Y-%m-%d")
+            else:
+                published = today
+        else:
+            seed = str(entry.get("cat", "")) + "|" + title
+            rid = "e" + sha1(seed.encode("utf-8")).hexdigest()[:16]
+            published = today
+        if not rid:
+            continue
+        out.append({
+            "id": rid,
+            "cat": str(entry.get("cat", "") or ""),
+            "title": title,
+            "fields": fields,
+            "times": entry.get("times") or [],
+            "link": link,
+            "time": str(entry.get("time", "") or ""),
+            "due": str(entry.get("due", "") or ""),
+            "published": published,
+        })
+    return out
 
 
 def is_valid(record: dict, today: str, no_due_expire_days: int = 30) -> bool:

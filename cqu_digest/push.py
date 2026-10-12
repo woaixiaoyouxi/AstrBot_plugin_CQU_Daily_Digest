@@ -27,34 +27,44 @@ class PushMixin:
                 sent = True
         return sent
 
-    async def _send_one(self, umo: str, text: str, blocks: list | None = None) -> bool:
-        """发一个会话。先试合并转发；失败就退回纯文本重发一次。
+    async def _send_one(self, umo: str, text: str, blocks: list | None = None,
+                        uin: str = "") -> bool:
+        """给一个会话发一份简报：先试合并转发卡片，失败退回纯文本。
 
-        合并转发依赖协议端实现（NapCat 认 send_private_forward_msg），
-        所以这里必须留退路——否则协议端一变，简报就彻底发不出去了。
+        这是【唯一】的发消息出口 —— 定时推送、回当前会话、通知管理员都走它。
+        所以 use_forward_msg 这类开关只要在这里判断一次，就对所有路径生效。
+        （以前 _emit_digest 自己发卡片，那条路绕过了这个开关。）
+
+        失败时把原因记在 self._forward_fail_reason，
+        好让调用方决定要不要把原因写给用户看（日志文件默认是关的）。
         """
+        self._forward_fail_reason = ""
         if self._cfg_bool("use_forward_msg", True):
-            chain = self._build_forward_chain(text)
+            chain = self._build_forward_chain(text, uin=uin, blocks=blocks)
             if chain is not None:
                 try:
                     ok = await self.context.send_message(umo, chain)
                     if ok:
                         return True
+                    self._forward_fail_reason = "平台没接上（send_message 返回 False）"
                     logger.warning("[简报] 合并转发没发出去，退回纯文本重发")
-                except Exception as exc:
+                except Exception as exc:                    # noqa: BLE001
+                    self._forward_fail_reason = f"{type(exc).__name__}: {exc}"
                     logger.warning(
                         f"[简报] 合并转发失败（{type(exc).__name__}: {exc}），退回纯文本重发"
                     )
+        plain = self._digester.expand_block_text(text, blocks or [])
         try:
             # send_message 只在会话格式非法时抛错；平台没接上时返回 False
-            plain = self._digester.expand_block_text(text, blocks or [])
             ok = await self.context.send_message(
                 umo, MessageChain().message(f"{ZWSP}{plain}{ZWSP}")
             )
-        except Exception as exc:
+        except Exception as exc:                            # noqa: BLE001
+            self._forward_fail_reason = f"纯文本也没发出去：{type(exc).__name__}: {exc}"
             logger.warning(f"[简报] 推送到 {umo} 失败：{exc}")
             return False
         if not ok:
+            self._forward_fail_reason = "纯文本也没匹配到在线平台"
             logger.warning(
                 f"[简报] 会话 {umo} 没匹配到在线平台，消息没发出去"
                 "（检查 aiocqhttp 平台是否已启用）"
@@ -212,28 +222,19 @@ class PushMixin:
 
     async def _emit_digest(self, event: AstrMessageEvent, text: str, note: str = "",
                           blocks: list | None = None):
-        """把简报正文以合并转发卡片回给当前会话；不行就退回纯文本。
+        """把简报回给【当前会话】。发不成功时把原因一并写给用户。
 
-        查询 / test / last / now 的正文都走这里，
-        保证"点进去一条一条"的观感一致。
+        它相对 _send_one 只多做一件事：把降级原因写进回复正文。
+        因为日志文件默认是关的（log_file_enable=False），只写日志的话用户什么都看不到。
+        其余（开关判断、建卡片、退回纯文本）全部交给 _send_one。
         """
         body = (note + chr(10) * 2 + text) if note else text
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
         sid = self._remember_self_id(event)
-        chain = self._build_forward_chain(body, uin=sid, blocks=blocks)
-        why = ""
-        if chain is not None:
-            umo = str(getattr(event, "unified_msg_origin", "") or "")
-            try:
-                ok = await self.context.send_message(umo, chain)
-                if ok:
-                    return
-                why = "平台没接上（send_message 返回 False）"
-            except Exception as exc:                            # noqa: BLE001
-                why = f"{type(exc).__name__}: {exc}"
-        else:
-            why = getattr(self, "_forward_fail_reason", "") or "未知原因"
-        logger.warning(f"[简报] 合并转发没成功，本条改用纯文本：{why}")
-        # 把原因一并回给你——日志文件默认是关的，不然你什么都看不到
+        if umo and await self._send_one(umo, body, blocks, uin=sid):
+            return
+        why = getattr(self, "_forward_fail_reason", "") or "未知原因"
+        logger.warning(f"[简报] 回话没成功，改用纯文本：{why}")
         yield event.plain_result("[合并转发没成功：" + why + "]"
                                 + chr(10) * 2
                                 + self._digester.expand_block_text(body, blocks or []))

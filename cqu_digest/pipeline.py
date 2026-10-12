@@ -1,7 +1,6 @@
 """主流水线：抓取 -> 去重 -> 补正文 -> 群消息 -> 交给渲染 -> 记账。"""
 import asyncio
 import time
-from hashlib import sha1
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -9,7 +8,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.fetch.engine import CHINA_TZ, Notice
 from cqu_digest.fetch.sources import SOURCES_BY_KEY
-from cqu_digest.digest.entries import days_between, split_entries
+from cqu_digest.digest.entries import days_between, split_entries, to_records
 
 BODY_FETCH_CONCURRENCY = 5
 
@@ -137,7 +136,7 @@ class PipelineMixin:
             parsed = split_entries(text)
             if parsed:
                 added = await self._store.upsert_entries(
-                    self._to_records(parsed, notices, self._today()), self._today()
+                    to_records(parsed, notices, self._today()), self._today()
                 )
                 if added:
                     logger.info(f"[简报] 条目库新增 {added} 条")
@@ -266,65 +265,6 @@ class PipelineMixin:
             })
         items.sort(key=lambda x: x["days_left"])
         return items
-
-    @staticmethod
-    def _to_records(parsed: list, notices: list[Notice], today: str) -> list:
-        """给解析出来的条目配上 id 和发布时间，成为可入库的记录。
-
-        id 从强到弱：① 链接对得上某条抓取结果 -> 用它的 id 和 published_at
-                     ② 对不上（群消息那条）-> 分类+标题 算一个稳定哈希
-        标题匹配带一层"互相包含"兜底，因为模型可能微调标题措辞。
-        """
-        by_link = {}
-        by_title = {}
-        for item in notices:
-            link = str(item.get("link", "") or "").strip()
-            if link:
-                by_link[link] = item
-            title = str(item.get("title", "") or "").strip()
-            if title:
-                by_title.setdefault(title, item)
-
-        out = []
-        for entry in parsed:
-            if not isinstance(entry, dict):
-                continue
-            fields = entry.get("fields") or {}
-            link = str(fields.get("链接", "") or "").strip()
-            title = str(entry.get("title", "") or "").strip()
-            hit = by_link.get(link) if link else None
-            if hit is None and title:
-                hit = by_title.get(title)
-                if hit is None:
-                    for key, item in by_title.items():
-                        if key and (key in title or title in key):
-                            hit = item
-                            break
-            if hit is not None:
-                rid = str(hit.get("id", "") or "")
-                published = hit.get("published_at")
-                if hasattr(published, "strftime"):
-                    published = published.strftime("%Y-%m-%d")
-                else:
-                    published = today
-            else:
-                seed = str(entry.get("cat", "")) + "|" + title
-                rid = "e" + sha1(seed.encode("utf-8")).hexdigest()[:16]
-                published = today
-            if not rid:
-                continue
-            out.append({
-                "id": rid,
-                "cat": str(entry.get("cat", "") or ""),
-                "title": title,
-                "fields": fields,
-                "times": entry.get("times") or [],
-                "link": link,
-                "time": str(entry.get("time", "") or ""),
-                "due": str(entry.get("due", "") or ""),
-                "published": published,
-            })
-        return out
 
     async def _weather_text(self) -> str:
         if not self._cfg_bool("weather_enabled", True):
