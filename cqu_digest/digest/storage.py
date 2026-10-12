@@ -107,6 +107,27 @@ class DigestStore:
     async def set_group_buffer(self, buffer: list[dict[str, Any]]) -> None:
         await self._put(KEY_GROUP_BUFFER, buffer)
 
+    async def update_group_buffer(self, transform) -> list[dict[str, Any]]:
+        """原子地「读 -> 改 -> 写」群缓冲。transform(buffer) 返回新缓冲。
+
+        ★ 为什么需要它：群消息的采集是「读全表 -> 追加一条 -> 整表写回」，
+          两次 await 之间手里的还是旧快照。而 AstrBot 对【每个】群消息事件
+          都是 asyncio.create_task（事件总线不串行化），所以两条消息几乎
+          同时到达时会互相覆盖 —— 轻则丢消息，重则在推送期间让已消费的
+          消息回流、下次重复发一遍。
+
+          和 upsert_entries / add_seen_ids 一样，读-改-写必须在同一个锁里。
+        """
+        async with self._lock:
+            # ★ 不能用 _as_list —— 它是给 seen_ids 那种字符串列表用的，
+            #   会把每个元素 str() 掉，dict 全变成字符串、再被下面的
+            #   isinstance 滤光，缓冲就永远是空的。必须像 get_group_buffer 那样读原始值。
+            raw = await self._get(KEY_GROUP_BUFFER, [])
+            rows = [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+            fresh = list(transform(rows))
+            await self._put(KEY_GROUP_BUFFER, fresh)
+            return fresh
+
     async def clear_group_buffer(self) -> None:
         await self._put(KEY_GROUP_BUFFER, [])
 

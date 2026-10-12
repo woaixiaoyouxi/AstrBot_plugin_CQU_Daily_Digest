@@ -114,7 +114,7 @@ class PushMixin:
             return None
 
         segs = self._digester.split_segments(text)
-        limit = self._cfg_int("max_forward_nodes", 40)
+        limit = self._cfg_int("max_forward_nodes", 60)
         # 群消息原文会被展开成额外的节点，所以按展开后的数量估算上限
         estimate = 0
         for _name, body in segs:
@@ -196,6 +196,14 @@ class PushMixin:
         admins = [str(x).strip() for x in self._cfg_list("command_allow_from", [])
                   if str(x).strip()]
         if not admins:
+            return False
+
+        # ★ 是管理员自己在查就不用通知他自己。
+        #   原来这里判的是 `target == umo`，但 target 永远是
+        #   platform:FriendMessage:qq、群会话的 umo 是 platform:GroupMessage:gid，
+        #   两者【永远不可能相等】—— 等于没判。于是管理员在开放群里发 /digest
+        #   会收到私聊的「群友查到新的消息了！」，而且被记成「群友查到的」。
+        if self._is_authorized(event):
             return False
 
         # 平台 ID 从触发它的那条 event 的 umo 里取（aiocqhttp:GroupMessage:群号）

@@ -41,6 +41,15 @@ DEFAULT_END_CONTAINS = ("截止", "结")
 DEFAULT_AGGREGATE_MINUTES = 10
 
 
+def _ts_of(item: Any) -> int:
+    """从缓冲条目里取时间戳。脏数据一律当 0 ——
+    不能因为 KV 里混进一条坏记录就让整条流水线抛异常。"""
+    try:
+        return int(item.get("ts", 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
 class GroupCollector:
     def __init__(self, store: DigestStore, config: dict[str, Any] | None = None):
         self._store = store
@@ -73,25 +82,26 @@ class GroupCollector:
             return
 
         mid = str(getattr(message_obj, "message_id", "") or "")
-        buffer = await self._store.get_group_buffer()
+        item = {
+            "gid": gid,
+            "sender": str(self._sender_id(message_obj)),
+            "sender_name": str(self._sender_name(message_obj)),
+            "text": text[:TEXT_LIMIT],
+            "images": images,
+            "reply_to": reply_to,
+            "is_end": self._is_end(text, reply_to),
+            "ts": int(time.time()),
+            "mid": mid,
+        }
 
-        if mid and any(item.get("mid") == mid for item in buffer):
-            return
+        def _add(buffer: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            # ★ 去重也放在锁里：同一条消息被重复回调时不能入两次。
+            #   放到锁外面的话，两条相同回调并发时会双双通过检查。
+            if mid and any(row.get("mid") == mid for row in buffer):
+                return buffer
+            return self._trim(buffer + [item])
 
-        buffer.append(
-            {
-                "gid": gid,
-                "sender": str(self._sender_id(message_obj)),
-                "sender_name": str(self._sender_name(message_obj)),
-                "text": text[:TEXT_LIMIT],
-                "images": images,
-                "reply_to": reply_to,
-                "is_end": self._is_end(text, reply_to),
-                "ts": int(time.time()),
-                "mid": mid,
-            }
-        )
-        await self._store.set_group_buffer(self._trim(buffer))
+        await self._store.update_group_buffer(_add)
 
     @staticmethod
     def _image_urls(message_obj: Any, limit: int = 3) -> list[str]:
@@ -162,18 +172,13 @@ class GroupCollector:
     # ── 读取（供简报组装）──────────────────────────────────────
 
     async def peek_recent(self) -> list[dict[str, Any]]:
-        """取窗口内的群消息，顺便清掉过期项，但不消费。调试用。"""
-        buffer = await self._store.get_group_buffer()
-        if not buffer:
-            return []
-
+        """取窗口内的群消息，顺便清掉过期项，但不消费。"""
         cutoff = int(time.time()) - self._hours() * 3600
-        recent = [item for item in buffer if int(item.get("ts", 0)) >= cutoff]
 
-        if len(recent) != len(buffer):
-            await self._store.set_group_buffer(recent)
-            logger.info(f"[简报] 群缓冲清理 {len(buffer) - len(recent)} 条过期消息")
-        return recent
+        def _clean(buffer: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            return [item for item in buffer if _ts_of(item) >= cutoff]
+
+        return await self._store.update_group_buffer(_clean)
 
     async def blocks(self) -> list[dict[str, Any]]:
         """把缓冲里的扁平消息聚成「通知块」，并处理「结」。
@@ -194,35 +199,48 @@ class GroupCollector:
     async def consume_recent(self) -> list[dict[str, Any]]:
         """取窗口内的群消息并从缓冲里删掉，避免下一天重复喂给 LLM。
 
-        只删这次真正读到的那批——抓取期间新到的消息不受影响。
+        只删这次真正读到的那批 —— 靠 snapshot 把抓取期间新到的消息隔在外面。
+        ★ 读和删必须在同一个锁里（storage.update_group_buffer）：
+          分两次做的话，推送期间新到的消息可能把已删的旧消息带回来。
         """
         snapshot = int(time.time())
-        recent = await self.peek_recent()
-        if not recent:
-            return []
+        cutoff = snapshot - self._hours() * 3600
+        taken: list[dict[str, Any]] = []
 
-        buffer = await self._store.get_group_buffer()
-        await self._store.set_group_buffer(
-            [item for item in buffer if int(item.get("ts", 0)) > snapshot]
-        )
-        return recent
+        def _take(buffer: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            taken.clear()
+            taken.extend(item for item in buffer if _ts_of(item) >= cutoff)
+            return [item for item in buffer if _ts_of(item) > snapshot]
+
+        await self._store.update_group_buffer(_take)
+        return list(taken)
 
     async def consume_blocks(self) -> list[dict[str, Any]]:
-        """取走块并从缓冲里删掉（推送用）。和 consume_recent 同构。"""
+        """取走块并从缓冲里删掉（推送用）。和 consume_recent 同构。
+
+        ★ 先原子地「取走 + 清空」，再拿【取走的那批】去聚块 ——
+          原来是先 blocks() 读一遍、再单独删一遍，两次读到的可能不是同一批。
+        """
         snapshot = int(time.time())
-        result = await self.blocks()
-        buffer = await self._store.get_group_buffer()
-        await self._store.set_group_buffer(
-            [item for item in buffer if int(item.get("ts", 0)) > snapshot]
-        )
-        return result
+        cutoff = snapshot - self._hours() * 3600
+        taken: list[dict[str, Any]] = []
+
+        def _take(buffer: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            taken.clear()
+            taken.extend(item for item in buffer if _ts_of(item) >= cutoff)
+            return [item for item in buffer if _ts_of(item) > snapshot]
+
+        await self._store.update_group_buffer(_take)
+        gap = max(1, self._aggregate_minutes()) * 60
+        grouped = block_utils.group_into_blocks(taken, gap, self._block_same_sender())
+        return block_utils.mark_closed(grouped)
 
     # ── 内部 ────────────────────────────────────────────────────
 
     def _trim(self, buffer: list[dict[str, Any]]) -> list[dict[str, Any]]:
         cutoff = int(time.time()) - self._hours() * 3600
-        buffer = [item for item in buffer if int(item.get("ts", 0)) >= cutoff]
-        return buffer[-self._max_buffer():]
+        kept = [item for item in buffer if _ts_of(item) >= cutoff]
+        return kept[-self._max_buffer():]
 
     def _enabled(self) -> bool:
         return bool(self.config.get("group_capture_enabled", True))

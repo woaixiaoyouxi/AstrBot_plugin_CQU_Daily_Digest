@@ -140,7 +140,7 @@ class CquDailyDigestPlugin(
 
     @filter.command("digest")
     async def digest_entry(self, event: AstrMessageEvent, sub: str = ""):
-        """每日简报：直接发 /digest 取一份，或跟 help/now/test/last 等子指令。"""
+        """每日简报：直接发 /digest 取一份，或跟 help/now/test/all/status/reset 子指令。"""
         action = str(sub or "").strip().lower()
 
         if action in ("", "query"):
