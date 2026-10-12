@@ -134,10 +134,30 @@ class DigestStore:
     # ── 条目库 ──────────────────────────────────────────────────
 
     async def get_entries(self) -> dict[str, dict[str, Any]]:
+        """读条目库。
+
+        ★ 这里是 KV 历史数据的【唯一出口】，所以脏记录的规范化放在这里做，
+          而不是让每个调用方各自 isinstance —— 那是「同一个规则散在多处」，
+          迟早有一处漏（实际上已经漏了：entry_block_text 查了 times 的元素类型，
+          而 entries 的 earliest_* 和 pipeline 那两处没查，会整条流水线抛异常）。
+
+          这里只【规范化形状】，不丢弃记录（读-改-写会把丢弃变成永久删除）。
+        """
         raw = await self._get(KEY_ENTRIES, {})
         if not isinstance(raw, dict):
             return {}
-        return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+        out: dict[str, dict[str, Any]] = {}
+        for key, value in raw.items():
+            if not isinstance(value, dict):
+                continue
+            row = dict(value)
+            times = row.get("times")
+            row["times"] = ([t for t in times if isinstance(t, dict)]
+                             if isinstance(times, list) else [])
+            if not isinstance(row.get("fields"), dict):
+                row["fields"] = {}
+            out[str(key)] = row
+        return out
 
     async def set_entries(self, entries: dict[str, dict[str, Any]]) -> None:
         """写库，顺带按入库时间裁到上限（丢最早的）。"""

@@ -57,7 +57,14 @@ def parse_date(value: str) -> str:
         return ""
     if len(y) == 2:
         y = "20" + y
-    if len(y) != 4 or not (1 <= int(m) <= 12) or not (1 <= int(d) <= 31):
+    if len(y) != 4:
+        return ""
+    try:
+        # ★ 用 datetime 校验真日历，而不是只查 1<=月<=12 / 1<=日<=31 ——
+        #   26/02/31 那种不存在的日期会通过后者，然后 days_between 对它返回 None，
+        #   结果是【到期提醒静默跳过这条】，看不出哪里错了。
+        datetime(int(y), int(m), int(d))
+    except ValueError:
         return ""
     return y + "-" + m.zfill(2) + "-" + d.zfill(2)
 
@@ -81,10 +88,14 @@ def is_due_note(note: str) -> bool:
 def item_title(line: str) -> str:
     """「[标题]」->「标题」；旧的「1. 标题」也认；不是条目标题返回空串。"""
     s = line.strip()
-    if s.startswith("[") and s.endswith("]") and 2 < len(s) <= 80:
+    # ★ 不设长度上限：超长时返回空串会让 split_entries 以为「还没开条」，
+    #   于是【紧跟其后的所有字段行一起被跳过】—— 整条通知在库里彻底不存在
+    #   （正文里还有，但 /digest all 和到期提醒都看不到它）。
+    #   改成认下来、只把标题截短。
+    if s.startswith("[") and s.endswith("]") and 2 < len(s):
         inner = s[1:-1].strip()
         if inner and "：" not in inner and ":" not in inner:
-            return inner
+            return inner[:200]
     head, dot, rest = s.partition(". ")
     if dot and head.isdigit():
         return rest.strip()
@@ -92,11 +103,17 @@ def item_title(line: str) -> str:
 
 
 def split_field(line: str):
-    """「内容简述：xxx」->（「内容简述」,「xxx」）；不是字段行返回 None。"""
+    """「内容简述：xxx」->（「内容简述」,「xxx」）；不是字段行返回 None。
+
+    ★ 半角冒号也认。原来只认全角，而 item_title 又用「：」和「:」两种
+      来排除标题行 —— 于是「内容简述: xxx」既不是标题、又解析不出字段，
+      整行静默丢掉。两处对冒号的态度必须一致。
+    """
     for name in FIELDS:
-        prefix = name + "："
-        if line.startswith(prefix):
-            return name, line[len(prefix):].strip()
+        for sep in ("：", ":"):
+            prefix = name + sep
+            if line.startswith(prefix):
+                return name, line[len(prefix):].strip()
     return None
 
 
@@ -315,6 +332,14 @@ def entry_block_text(record: dict) -> str:
         place = str(slot.get("place", "") or "")
         if place:
             lines.append("地点：" + place)
+    # 地点也可能落在 fields 里（解析时「地点」行没有前置「时间」的情况）。
+    # 这里补上 —— 否则那条地点只存在于库里、渲染不出来。
+    extra_place = str(fields.get("地点", "") or "").strip()
+    if extra_place and not any(
+        str(slot.get("place", "") or "").strip()
+        for slot in (record.get("times") or [])
+    ):
+        lines.append("地点：" + extra_place)
     for name in ("链接", "要求", "能获得什么"):
         value = fields.get(name)
         if value:

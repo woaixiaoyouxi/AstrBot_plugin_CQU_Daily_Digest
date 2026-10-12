@@ -174,10 +174,18 @@ class PipelineMixin:
                 text, self._digester.render_due_soon(due_items)
             )
             logger.info(f"[简报] 即将截止 {len(due_items)} 条")
+            # ★ 插完再截一次：build() 内部那次截断发生在插入【即将截止】之前，
+            #   不管的话最终正文可能超过 max_digest_chars。
+            text = self._digester.truncate(text)
 
         pushed = False
         if not dry_run:
-            await self._store.set_last_digest(text)
+            # ★ digest_last 是「上次真推出去的原文」——推出去的形态是
+            #   占位符已经展开的，所以存的也该是展开后的。不然接上
+            #   「看上次简报」会把 {{BLOCK:n}} 直接漏给用户。
+            await self._store.set_last_digest(
+                block_utils.expand_block_text(text, group_messages)
+            )
             if seeded:
                 logger.info(f"[简报] 首次运行：记录 {len(notices)} 条为基线，本次不推送")
                 # 首次要记【全部】：只记进正文的那部分的话，下次会把剩下的

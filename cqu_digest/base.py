@@ -9,6 +9,22 @@
 from datetime import datetime, timedelta, timezone
 from typing import TypedDict
 
+def cfg_int(config: dict | None, key: str, default: int) -> int:
+    """读整数配置。类型不对、或者范围离谱的，一律回落到默认值。
+
+    ★ 住在 base.py（零依赖）而不是 config.py：Digester 那种不继承 mixin 的类
+      也要读配置，如果从 config 拿，就会连带依赖 astrbot —— renderer 的可测性就没了。
+      同一个规则也只有这一处实现。
+    """
+    try:
+        value = int((config or {}).get(key, default))
+    except (ValueError, TypeError):
+        return default
+    if value < 0 or value > 100000:
+        return default
+    return value
+
+
 CHINA_TZ = timezone(timedelta(hours=8))
 """东八区。日期分界、抓取时间戳、简报落款都用它。"""
 

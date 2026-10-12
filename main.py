@@ -79,7 +79,7 @@ class CquDailyDigestPlugin(
         self._run_lock = asyncio.Lock()
         # 公开查询的冷却缓存：umo -> (取到的时刻, 简报文本)。
         # 不写 KV 也不写 digest_last——digest_last 是「他那一份」，被群查询覆盖掉就乱了。
-        self._query_cache: dict[str, tuple[float, str]] = {}
+        self._query_cache: dict[str, tuple[float, str, list | None]] = {}
         # 机器人自己的 QQ 号：event 触发时拿到就存起来，定时推送时用它
         self._cached_self_id = ""
         # 正在跑 + 在排队的流水线数（排队提示要报位置）

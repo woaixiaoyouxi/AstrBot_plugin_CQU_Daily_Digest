@@ -45,6 +45,8 @@ class CommandsMixin:
         抽出来的理由：/digest 和 /digest all 这段原来逐字相同、各写各的，
         上次给 all 补冷却就是因为漏改了一处。
         """
+        self._prune_query_cache()
+
         if self._deny(event):
             return QueryGateResult(QueryGate.STOP)
 
@@ -66,6 +68,20 @@ class CommandsMixin:
         if not await self._ack_and_check_queue(event):
             return QueryGateResult(QueryGate.STOP)
         return QueryGateResult(QueryGate.RUN, key=key, cooldown=cooldown)
+
+    QUERY_CACHE_MAX = 200
+
+    def _prune_query_cache(self) -> None:
+        """查询缓存满了就丢掉最老的一半。
+
+        不清理的话它会按会话一直攒 —— 会话数有限所以影响很小，
+        但顺手清一下更省心（缓存里是三元的 (时刻, 文本, blocks)）。
+        """
+        if len(self._query_cache) <= self.QUERY_CACHE_MAX:
+            return
+        oldest = sorted(self._query_cache.items(), key=lambda kv: kv[1][0])
+        for key, _value in oldest[:len(oldest) // 2]:
+            self._query_cache.pop(key, None)
 
     async def _cmd_query(self, event: AstrMessageEvent):
         """公开查询（增量）：有新通知才现算一份，没有就直接回「新增 0 条」。
@@ -300,7 +316,9 @@ class CommandsMixin:
         """清数据。三个动作各自独立，都要带上词才执行。"""
         if self._deny(event, admin_only=True):
             return
-        words = [w for w in str(getattr(event, "message_str", "") or "").split()]
+        # 全部转小写再找：main.py 的分派是 sub.lower()，所以 /digest RESET 能进来，
+        # 但这里原来是区分大小写的，于是落到菜单而不是执行。
+        words = [w.lower() for w in str(getattr(event, "message_str", "") or "").split()]
         word = ""
         if "reset" in words:
             index = words.index("reset")

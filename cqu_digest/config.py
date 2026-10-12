@@ -5,8 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, MessageChain
-from cqu_digest.base import CHINA_TZ
+from cqu_digest.base import CHINA_TZ, cfg_int
 
 def _flatten_config(config: Any) -> dict[str, Any]:
     """把分组配置摊平一层，让平铺读法能读到值。
@@ -36,10 +35,7 @@ class ConfigMixin:
         return bool(value)
 
     def _cfg_int(self, key: str, default: int) -> int:
-        try:
-            return int(self.config.get(key, default))
-        except (ValueError, TypeError):
-            return default
+        return cfg_int(self.config, key, default)
 
     def _cfg_list(self, key: str, default: list[str]) -> list[str]:
         """读字符串列表配置；类型不对就当空列表，别让脏配置炸掉整条流水线。"""

@@ -19,6 +19,7 @@ from typing import Any
 from astrbot.api import logger
 
 from cqu_digest.base import CHINA_TZ, Notice
+from cqu_digest.base import cfg_int
 from cqu_digest.fetch.sources import category_title
 from cqu_digest.digest.entries import (HEADER_RE, SEP_LINE, item_title,
                                            short_date)
@@ -143,8 +144,8 @@ class Digester:
             # 调用成功、但模型一条都没留 = 「筛完没剩下」，这是正常结果。
             # 绝不能退回 _fallback_render——那会把刚被筛掉的行政公文原样倒出来。
             logger.info("[简报] 模型没留下任何条目，按「今日无相关通知」处理")
-            return self._truncate(f"{head}\n\n今日无与学生相关的新通知。")
-        return self._truncate(f"{head}\n\n{self._space_sections(text)}")
+            return self.truncate(f"{head}\n\n今日无与学生相关的新通知。")
+        return self.truncate(f"{head}\n\n{self._space_sections(text)}")
 
     # ── Provider 选择 ───────────────────────────────────────────
 
@@ -251,9 +252,7 @@ class Digester:
         if current:
             blocks.append(current)
 
-        if len(blocks) <= 1:
-            return text.strip()
-
+        # 不再「只有一个分类就不插线」—— 那样同一个排版功能有两种表现。
         rendered = []
         for block in blocks:
             text_block = chr(10).join(block).strip(chr(10))
@@ -399,7 +398,7 @@ class Digester:
             lines.append("")
             lines.append("今日无新增通知。")
 
-        return self._truncate("\n".join(lines))
+        return self.truncate("\n".join(lines))
 
     @staticmethod
     def _header(date_str: str, weather: str) -> str:
@@ -408,14 +407,21 @@ class Digester:
             head = f"{head}\n{weather}"
         return head
 
-    def _truncate(self, text: str) -> str:
+    def truncate(self, text: str) -> str:
+        """按 max_digest_chars 截断。
+
+        改成公开的（原来是 _truncate）：pipeline 插完【即将截止】之后
+        还要再截一次 —— 那一段是在 build() 内部截断之后才插进去的。
+
+        max(1, ...) 是必须的：_cfg_int 已经挡住了负数配置，但 limit 很小
+        （比如 5）时 limit - 20 依然是负数，而负数切片既不报错也不截断。
+        """
         limit = self._cfg_int("max_digest_chars", 3500)
         if len(text) <= limit:
             return text
-        return text[: limit - 20].rstrip() + "\n……（已截断）"
+        return text[:max(1, limit - 20)].rstrip() + chr(10) + "……（已截断）"
 
     def _cfg_int(self, key: str, default: int) -> int:
-        try:
-            return int(self.config.get(key, default))
-        except (ValueError, TypeError):
-            return default
+        # ★ 委托给模块级那份，不再自己抄一遍。
+        #   抄的那份会漏掉范围检查 —— 补丁 C 加完之后就又漏了一次。
+        return cfg_int(self.config, key, default)

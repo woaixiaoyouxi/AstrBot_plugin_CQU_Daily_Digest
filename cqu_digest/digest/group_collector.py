@@ -81,6 +81,13 @@ class GroupCollector:
         if not self._passes_keywords(text):
             return
 
+        # 机器人自己发的消息不入库：有的协议端会把自身消息也回显过来，
+        # 那样简报的群消息段就会把自己的推送再卷进去。
+        self_id = str(getattr(message_obj, "self_id", "") or "")
+        sender_id = str(self._sender_id(message_obj))
+        if self_id and sender_id and self_id == sender_id:
+            return
+
         mid = str(getattr(message_obj, "message_id", "") or "")
         item = {
             "gid": gid,
