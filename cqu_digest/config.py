@@ -6,7 +6,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from cqu_digest.fetch.engine import CHINA_TZ
+from cqu_digest.base import CHINA_TZ
 
 def _flatten_config(config: Any) -> dict[str, Any]:
     """把分组配置摊平一层，让平铺读法能读到值。

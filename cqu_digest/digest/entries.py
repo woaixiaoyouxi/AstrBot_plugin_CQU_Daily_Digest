@@ -28,10 +28,11 @@ from hashlib import sha1
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    # ★ 只在做类型检查时 import。运行时零依赖 ——
-    #   否则 entries 会连带依赖 fetch.engine（那里 import 了 httpx / bs4），
-    #   这个「纯数据转换」模块就没法单独跑测试了。
-    from cqu_digest.fetch.engine import Notice
+    # ★ 只在做类型检查时 import：这个模块要能【按文件路径】单独加载
+    #   （_测条目解析.py 就是这么干的，那时包里其他模块不一定能 import）。
+    #   Notice 本身在 base.py 里已经零依赖了，之所以不直接 import，
+    #   只是为了保住「entries.py 单独一个文件就能跑」。
+    from cqu_digest.base import Notice
 
 SEP_LINE = "——————————"
 HEADER_RE = re.compile(r"^【[^】]+】$")

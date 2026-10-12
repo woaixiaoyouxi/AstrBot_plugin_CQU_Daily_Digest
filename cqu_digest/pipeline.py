@@ -6,7 +6,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from cqu_digest.fetch.engine import CHINA_TZ, Notice
+from cqu_digest.base import CHINA_TZ, Notice
 from cqu_digest.digest import blocks as block_utils
 from cqu_digest.fetch.sources import SOURCES_BY_KEY
 from cqu_digest.digest.entries import days_between, split_entries, to_records

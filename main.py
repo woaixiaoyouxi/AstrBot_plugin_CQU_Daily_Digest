@@ -55,7 +55,8 @@ from cqu_digest.pipeline import PipelineMixin                  # noqa: E402
 from cqu_digest.push import PushMixin                          # noqa: E402
 from cqu_digest.schedule import ScheduleMixin                  # noqa: E402
 from cqu_digest.digest.storage import DigestStore              # noqa: E402
-from cqu_digest.fetch.engine import CHINA_TZ, Notice, NoticeFetcher  # noqa: E402
+from cqu_digest.base import CHINA_TZ, Notice  # noqa: E402
+from cqu_digest.fetch.engine import NoticeFetcher  # noqa: E402
 from cqu_digest.fetch.sources import (                         # noqa: E402
     SOURCES_BY_KEY,
     format_source_lines,

@@ -18,9 +18,8 @@ from bs4 import BeautifulSoup, Tag
 
 from astrbot.api import logger
 
+from cqu_digest.base import CHINA_TZ, Notice
 from cqu_digest.fetch.sources import SOURCES, SourceConfig
-
-CHINA_TZ = timezone(timedelta(hours=8))
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -40,18 +39,6 @@ _NOISE_SELECTORS = ("script", "style", "nav", "header", "footer", "noscript", "i
 
 # 列表页摘要的截断长度
 EXCERPT_LIMIT = 500
-
-
-class Notice(TypedDict):
-    id: str
-    title: str
-    link: str
-    source: str
-    source_key: str
-    category: str
-    date: str
-    published_at: datetime
-    body: str
 
 
 class NoticeFetcher:

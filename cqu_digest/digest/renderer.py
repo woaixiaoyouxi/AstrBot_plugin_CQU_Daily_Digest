@@ -18,7 +18,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from cqu_digest.fetch.engine import CHINA_TZ, Notice
+from cqu_digest.base import CHINA_TZ, Notice
 from cqu_digest.fetch.sources import category_title
 from cqu_digest.digest.entries import (HEADER_RE, SEP_LINE, item_title,
                                            short_date)
