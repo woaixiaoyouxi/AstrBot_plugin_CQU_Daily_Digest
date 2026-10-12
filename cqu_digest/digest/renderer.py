@@ -31,14 +31,6 @@ SECTION_GAP = "\n\n\n\n"
 PREFERRED_CATEGORIES = ("【校内通知】", "【竞赛】", "【群消息转发】")
 """拼库里的条目时的分类顺序。清单里没有的分类按出现顺序排在后面。"""
 
-BLOCK_REF_PREFIX = "块号："
-"""模型每条群消息转发条目的第一行，写它对应的块编号。"""
-
-BLOCK_HEAD = "{{BLOCK:"
-BLOCK_TAIL = "}}"
-"""占位符。stamp 时写进去，发送前展开成内嵌卡片或原文。"""
-
-
 SYSTEM_PROMPT = """你在为一名重庆大学计算机学院的本科生整理「每日简报」。
 
 先做相关性筛选，这一步最重要：
@@ -427,94 +419,6 @@ class Digester:
             if value:
                 lines.append(name + "：" + str(value))
         return chr(10).join(lines)
-
-    # ── 群消息块占位符 ──────────────────────────────────────────
-
-    @staticmethod
-    def stamp_block_refs(text: str, blocks: list) -> str:
-        """把每条里的「块号：N」整行换成占位符 {{BLOCK:N}}。
-
-        N 越界或不是数字就整行丢掉（模型偶尔会编一个不存在的块号）。
-        """
-        if not text:
-            return text
-        total = len(blocks or [])
-        out = []
-        for line in text.split(chr(10)):
-            s = line.strip()
-            if not s.startswith(BLOCK_REF_PREFIX):
-                out.append(line)
-                continue
-            raw = s[len(BLOCK_REF_PREFIX):].strip()
-            if raw.isdigit() and 1 <= int(raw) <= total:
-                indent = line[:len(line) - len(line.lstrip())]
-                out.append(indent + BLOCK_HEAD + raw + BLOCK_TAIL)
-        return chr(10).join(out)
-
-    @staticmethod
-    def block_ref_of(line: str):
-        """从一行里认出 {{BLOCK:N}}，返回 N（1 起）；不是占位符返回 None。"""
-        s = (line or "").strip()
-        if not (s.startswith(BLOCK_HEAD) and s.endswith(BLOCK_TAIL)):
-            return None
-        mid = s[len(BLOCK_HEAD):-len(BLOCK_TAIL)]
-        return int(mid) if mid.isdigit() else None
-
-    @classmethod
-    def expand_block_text(cls, text: str, blocks: list) -> str:
-        """纯文本路径：把占位符整行换成原文。
-
-        展开不出来（没块了、编号越界）就丢掉那一行，不留占位符字样。
-        """
-        if not text:
-            return text
-        if BLOCK_HEAD not in text:
-            return text
-        out = []
-        for line in text.split(chr(10)):
-            block_no = cls.block_ref_of(line)
-            if block_no is None:
-                out.append(line)
-                continue
-            plain = cls.block_plain_text(blocks, block_no)
-            if plain:
-                out.append(plain)
-        return chr(10).join(out)
-
-    @staticmethod
-    def block_plain_text(blocks: list, block_no: int) -> str:
-        """一个块的纯文本形态。"""
-        if not blocks or not (1 <= block_no <= len(blocks)):
-            return ""
-        block = blocks[block_no - 1]
-        lines = []
-        for message in block.get("items") or []:
-            who = message.get("sender_name") or message.get("sender", "")
-            lines.append("群 " + str(message.get("gid", "")) + " · " + str(who))
-            lines.append("   " + str(message.get("text") or "（无文字）"))
-            for pic in message.get("images") or []:
-                lines.append("   图片：" + str(pic))
-        return chr(10).join(lines)
-
-    @staticmethod
-    def block_card_nodes(blocks: list, block_no: int) -> list:
-        """一个块的内嵌卡片数据：[（发布者, [（类型, 值）, …]）, …]。
-
-        类型是 text / image。这里只吐数据，拼 Node 是 push.py 的事。
-        """
-        if not blocks or not (1 <= block_no <= len(blocks)):
-            return []
-        block = blocks[block_no - 1]
-        out = []
-        for message in block.get("items") or []:
-            who = str(message.get("sender_name") or message.get("sender") or "")
-            parts = [("text", str(message.get("text") or "（无文字）"))]
-            for pic in message.get("images") or []:
-                parts.append(("image", str(pic)))
-            out.append((who, parts))
-        return out
-
-    # ── 降级渲染 ────────────────────────────────────────────────
 
     def _fallback_render(
         self,

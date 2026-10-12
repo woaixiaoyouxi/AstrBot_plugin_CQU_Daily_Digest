@@ -7,6 +7,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.fetch.engine import CHINA_TZ, Notice
+from cqu_digest.digest import blocks as block_utils
 from cqu_digest.fetch.sources import SOURCES_BY_KEY
 from cqu_digest.digest.entries import days_between, split_entries, to_records
 
@@ -148,7 +149,7 @@ class PipelineMixin:
 
         # 群消息的「块号：N」换成占位符。放在入库之后 —— 入库时要靠那行配对。
         if group_messages:
-            text = self._digester.stamp_block_refs(text, group_messages)
+            text = block_utils.stamp_block_refs(text, group_messages)
 
         # 到期提醒：从库里挑"已推送过 + 快到期"的，插在头部之后、第一个分类之前。
         # 放在入库之后 —— 它读的就是刚写进去的那张表。

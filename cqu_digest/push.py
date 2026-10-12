@@ -6,6 +6,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
+from cqu_digest.digest import blocks as block_utils
 
 ZWSP = "\u200b"
 """零宽空格：aiocqhttp 会 strip 纯文本，用它把首尾空白钉住。"""
@@ -53,7 +54,7 @@ class PushMixin:
                     logger.warning(
                         f"[简报] 合并转发失败（{type(exc).__name__}: {exc}），退回纯文本重发"
                     )
-        plain = self._digester.expand_block_text(text, blocks or [])
+        plain = block_utils.expand_block_text(text, blocks or [])
         try:
             # send_message 只在会话格式非法时抛错；平台没接上时返回 False
             ok = await self.context.send_message(
@@ -119,7 +120,7 @@ class PushMixin:
         for _name, body in segs:
             estimate += 1
             for line in body.split(chr(10)):
-                if self._digester.block_ref_of(line) is not None:
+                if block_utils.block_ref_of(line) is not None:
                     estimate += 1
         if not segs or estimate > limit:
             self._forward_fail_reason = f"节点数 {estimate} 超出上限 {limit}"
@@ -135,9 +136,9 @@ class PushMixin:
         nodes = []
         for name, body in segs:
             refs = [
-                self._digester.block_ref_of(line)
+                block_utils.block_ref_of(line)
                 for line in body.split(chr(10))
-                if self._digester.block_ref_of(line) is not None
+                if block_utils.block_ref_of(line) is not None
             ]
             if refs and blocks:
                 # 原文内嵌卡片在前，去掉占位符的规范化条目在后
@@ -147,13 +148,13 @@ class PushMixin:
                     )
                 cleaned = chr(10).join(
                     line for line in body.split(chr(10))
-                    if self._digester.block_ref_of(line) is None
+                    if block_utils.block_ref_of(line) is None
                 ).strip()
                 nodes.append(Node(content=[Plain(cleaned or name)], name=name, uin=use_uin))
             else:
                 cleaned = chr(10).join(
                     line for line in body.split(chr(10))
-                    if self._digester.block_ref_of(line) is None
+                    if block_utils.block_ref_of(line) is None
                 ).strip()
                 nodes.append(Node(content=[Plain(cleaned or body)], name=name, uin=use_uin))
         logger.info(f"[简报] 合并转发：{len(nodes)} 个节点，uin={use_uin}")
@@ -167,7 +168,7 @@ class PushMixin:
         「未知的消息类型：undefined」，所以只能塞【单个 Node】。
         """
         inner = []
-        for who, parts in self._digester.block_card_nodes(blocks, block_no):
+        for who, parts in block_utils.block_card_nodes(blocks, block_no):
             content = []
             for kind, value in parts:
                 if kind == "image":
@@ -237,6 +238,6 @@ class PushMixin:
         logger.warning(f"[简报] 回话没成功，改用纯文本：{why}")
         yield event.plain_result("[合并转发没成功：" + why + "]"
                                 + chr(10) * 2
-                                + self._digester.expand_block_text(body, blocks or []))
+                                + block_utils.expand_block_text(body, blocks or []))
 
     # ── 群消息采集（绝不 yield，yield 会把内容发回群里）─────────
