@@ -67,11 +67,15 @@ class DigestStore:
         return {str(item) for item in raw}
 
     async def add_seen_ids(self, ids: list[str], cap: int = SEEN_IDS_CAP) -> None:
-        merged = list(dict.fromkeys([*await self._as_list(KEY_SEEN_IDS), *ids]))
-        await self._put(KEY_SEEN_IDS, merged[-cap:])
+        # 也要加锁：/digest 会在【流水线锁外面】调它（通知管理员成功之后补写），
+        # 两个群同时查到新通知就可能各读一份、互相覆盖。
+        async with self._lock:
+            merged = list(dict.fromkeys([*await self._as_list(KEY_SEEN_IDS), *ids]))
+            await self._put(KEY_SEEN_IDS, merged[-cap:])
 
     async def clear_seen_ids(self) -> None:
-        await self._put(KEY_SEEN_IDS, [])
+        async with self._lock:
+            await self._put(KEY_SEEN_IDS, [])
 
     # ── 上次运行日期（启动补偿用）──────────────────────────────
 

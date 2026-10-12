@@ -49,7 +49,10 @@ class ConfigMixin:
         return [str(item).strip() for item in value if str(item).strip()]
 
     def _push_time(self) -> tuple[int, int]:
-        raw = str(self.config.get("push_time", "09:00") or "09:00")
+        raw = str(self.config.get("push_time", "09:00") or "09:00").strip()
+        # 中文输入法很容易打出全角冒号和全角空格。不认的话 int() 会抛错、
+        # 然后静默回落到 09:00 —— 用户完全看不出来自己设的时间没生效。
+        raw = raw.replace("：", ":").replace("　", "").replace("．", ".")
         head, _, tail = raw.partition(":")
         try:
             hour, minute = int(head), int(tail)

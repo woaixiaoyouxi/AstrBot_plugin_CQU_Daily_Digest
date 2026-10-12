@@ -9,9 +9,6 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.fetch.sources import format_source_lines, unconfigured_keys
 from cqu_digest.digest.entries import is_valid, split_entries
 
-QUEUE_LIMIT = 3
-"""排队的忍耐上限。超过就劝退——不然连点会把队列堆起来。"""
-
 
 class CommandsMixin:
     async def _cmd_query(self, event: AstrMessageEvent):
@@ -79,7 +76,8 @@ class CommandsMixin:
         ahead = self._queue_ahead()
         if ahead <= 0:
             return "", True
-        if ahead > QUEUE_LIMIT:
+        limit = max(1, self._cfg_int("queue_limit", 3))
+        if ahead > limit:
             return ("排队的人太多了（前面 " + str(ahead) + " 个），过一会儿再来吧。", False)
         return ("已收到请求，目前排队在第 " + str(ahead + 1) + " 位（前面还有 "
                 + str(ahead) + " 个在跑），请稍后…", True)

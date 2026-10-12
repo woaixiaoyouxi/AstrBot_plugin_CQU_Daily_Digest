@@ -20,15 +20,13 @@ from astrbot.api import logger
 
 from cqu_digest.fetch.engine import CHINA_TZ, Notice
 from cqu_digest.fetch.sources import category_title
-from cqu_digest.digest.entries import short_date
+from cqu_digest.digest.entries import (HEADER_RE, SEP_LINE, item_title,
+                                           short_date)
 
 CATEGORY_ORDER = ("campus", "competition")
 
 SECTION_GAP = "\n\n\n\n"
 """分类之间的空行——换行符+3 个空行。"""
-
-SEP_LINE = "——————————"
-"""分类标题下面那条分割线。由脚本统一插，不指望模型排版。"""
 
 PREFERRED_CATEGORIES = ("【校内通知】", "【竞赛】", "【群消息转发】")
 """拼库里的条目时的分类顺序。清单里没有的分类按出现顺序排在后面。"""
@@ -40,25 +38,6 @@ BLOCK_HEAD = "{{BLOCK:"
 BLOCK_TAIL = "}}"
 """占位符。stamp 时写进去，发送前展开成内嵌卡片或原文。"""
 
-_HEADER_RE = re.compile(r"^【[^】]+】$")
-"""分类小标题的识别式，如「【校内通知】」。模型排版不可控，靠这个重新拼。"""
-
-
-def item_title(line: str) -> str:
-    """认出"这是一个条目的开头"，返回它的标题；不是条目就返回空串。
-
-    新格式是 [标题]（半角方括号包住整行）；旧的 "1. 标题" 也留着兼容。
-    刻意用字符串切分而不是正则：正则里的反斜杠很容易在别处被转义吃掉。
-    """
-    s = line.strip()
-    if s.startswith("[") and s.endswith("]") and 2 < len(s) <= 80:
-        inner = s[1:-1].strip()
-        if inner and "：" not in inner and ":" not in inner:
-            return inner
-    head, dot, rest = s.partition(". ")
-    if dot and head.isdigit():
-        return rest.strip()
-    return ""
 
 SYSTEM_PROMPT = """你在为一名重庆大学计算机学院的本科生整理「每日简报」。
 
@@ -274,7 +253,7 @@ class Digester:
         blocks: list[list[str]] = []
         current: list[str] = []
         for line in text.split("\n"):
-            if _HEADER_RE.match(line.strip()):
+            if HEADER_RE.match(line.strip()):
                 if current:
                     blocks.append(current)
                 current = [line.strip()]
@@ -290,14 +269,13 @@ class Digester:
         for block in blocks:
             text_block = chr(10).join(block).strip(chr(10))
             lines = text_block.split(chr(10))
-            if lines and _HEADER_RE.match(lines[0].strip()):
+            if lines and HEADER_RE.match(lines[0].strip()):
                 lines.insert(1, SEP_LINE)
             rendered.append(chr(10).join(lines))
         return SECTION_GAP.join(rendered)
 
     # ── 合并转发用的切段 ────────────────────────────────────────
 
-    SEP_LINE = "─" * 14
     HEAD_NAME = "每日简报"
 
     @classmethod
@@ -313,7 +291,7 @@ class Digester:
         segs: list[tuple[str, str]] = []
         head: list[str] = []
         i = 0
-        while i < len(lines) and not _HEADER_RE.match(lines[i].strip()):
+        while i < len(lines) and not HEADER_RE.match(lines[i].strip()):
             head.append(lines[i])
             i += 1
         segs.append((cls.HEAD_NAME, chr(10).join(head).strip() or cls.HEAD_NAME))
@@ -327,12 +305,12 @@ class Digester:
             blob = chr(10).join(body).strip()
             # 分类节点即使正文为空也要留着：分割线是排版统一插的，
             # 模型万一没写，也不该把整个分类弄丢
-            if blob or _HEADER_RE.match(name):
+            if blob or HEADER_RE.match(name):
                 segs.append((name, blob or name))
 
         while i < len(lines):
             s = lines[i].strip()
-            if _HEADER_RE.match(s):
+            if HEADER_RE.match(s):
                 flush()
                 name, body = s, []
             else:
@@ -379,14 +357,14 @@ class Digester:
     def insert_section(text: str, section: str) -> str:
         """把一段内容插到第一个【分类】之前（也就是头部之后）。
 
-        【每日简报】那行后面还跟着日期，匹配不上 _HEADER_RE，
+        【每日简报】那行后面还跟着日期，匹配不上 HEADER_RE，
         所以"第一个匹配的行"就是第一个真分类。
         """
         if not section:
             return text
         lines = text.split(chr(10))
         for i, line in enumerate(lines):
-            if _HEADER_RE.match(line.strip()):
+            if HEADER_RE.match(line.strip()):
                 head = chr(10).join(lines[:i]).rstrip()
                 tail = chr(10).join(lines[i:]).strip()
                 return head + chr(10) * 2 + section.strip() + chr(10) * 2 + tail

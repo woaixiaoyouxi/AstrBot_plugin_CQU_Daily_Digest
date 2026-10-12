@@ -26,14 +26,16 @@ from cqu_digest.digest.storage import DigestStore
 
 TEXT_LIMIT = 300
 
-END_KEYWORDS = ("截止", "结")
-"""收尾词里要含的字。"""
-
-END_EXACT = ("结", "已结", "截止", "已截止", "结束", "已结束", "截止了", "已截止了")
+DEFAULT_END_EXACT = ("结", "已结", "截止", "已截止", "结束", "已结束",
+                     "截止了", "已截止了")
 """没引用别人时，只有【精确等于】这些才算"结"。
 
+可在面板 group_end_keywords 里改 —— 通知群实际怎么写还没实测过，很可能要加词。
 刻意收严：正文里出现"截止"太常见了（"报名截止"就四个字），
 按包含判定会把整条通知误判成收尾。"""
+
+DEFAULT_END_CONTAINS = ("截止", "结")
+"""引用回复时按【包含】判定用的字。可在面板 group_end_contains 里改。"""
 
 DEFAULT_AGGREGATE_MINUTES = 10
 
@@ -122,8 +124,21 @@ class GroupCollector:
                     return val
         return ""
 
-    @staticmethod
-    def _is_end(text: str, reply_to: str) -> bool:
+    def _end_exact(self) -> tuple:
+        words = self._keywords_of("group_end_keywords")
+        return tuple(words) if words else DEFAULT_END_EXACT
+
+    def _end_contains(self) -> tuple:
+        words = self._keywords_of("group_end_contains")
+        return tuple(words) if words else DEFAULT_END_CONTAINS
+
+    def _keywords_of(self, key: str) -> list:
+        raw = self.config.get(key, [])
+        if not isinstance(raw, list):
+            return []
+        return [str(x).strip() for x in raw if str(x).strip()]
+
+    def _is_end(self, text: str, reply_to: str) -> bool:
         """这条看起来像不像"结"（收尾词）。
 
         两种形态，判据不一样：
@@ -131,14 +146,16 @@ class GroupCollector:
              （引用本身是人为动作，而且很短，基本就是收尾）
           ② 没引用 -> 只认精确等于白名单
              （"报名截止"这种片段不会被误杀成收尾）
+
+        词表都从面板读（group_end_keywords / group_end_contains）。
         """
         s = (text or "").strip()
         if not s:
             return False
-        if s in END_EXACT:
+        if s in self._end_exact():
             return True
         if reply_to and len(s) <= 10:
-            return any(word in s for word in END_KEYWORDS)
+            return any(word in s for word in self._end_contains())
         return False
 
     # ── 读取（供简报组装）──────────────────────────────────────
