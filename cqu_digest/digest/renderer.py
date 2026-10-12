@@ -356,19 +356,6 @@ class Digester:
         return cls._header(date_str, weather)
 
     @staticmethod
-    def replace_header(text: str, new_header: str) -> str:
-        """把简报的头部换成新的（第一个【分类】之前的那几行）。
-
-        没有新通知时复用上次那份公开简报，但日期和天气必须是今天的，
-        否则群友会看到昨天的日期。
-        """
-        lines = text.split(chr(10))
-        for i, ln in enumerate(lines):
-            if _HEADER_RE.match(ln.strip()):
-                return new_header + chr(10) * 2 + chr(10).join(lines[i:]).strip()
-        return new_header + chr(10) * 2 + text.strip()
-
-    @staticmethod
     def render_due_soon(items: list) -> str:
         """渲染【即将截止】分类。items 是 [{title, due, note, link, days_left}]。"""
         if not items:

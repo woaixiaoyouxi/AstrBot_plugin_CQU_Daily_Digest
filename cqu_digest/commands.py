@@ -12,9 +12,6 @@ from cqu_digest.digest.entries import is_valid, split_entries
 QUEUE_LIMIT = 3
 """排队的忍耐上限。超过就劝退——不然连点会把队列堆起来。"""
 
-QUERY_RECENT_DAYS = 3
-"""公开查询只看最近几天的通知（没有已读基线，不卡窗口会倒出整站历史）。"""
-
 
 class CommandsMixin:
     async def _cmd_query(self, event: AstrMessageEvent):
@@ -56,9 +53,6 @@ class CommandsMixin:
             only_new=True,
             keep_entries=True,
         )
-        if result["skipped"]:
-            yield event.plain_result("刚好在生成简报，稍等十几秒再来。")
-            return
 
         # 增量：一条新的都没有就直接说一声，连生成都省了
         if result["new"] <= 0 or not result["text"]:
@@ -107,9 +101,6 @@ class CommandsMixin:
             return
 
         result = await self._run_once()
-        if result["skipped"]:
-            yield event.plain_result("已经有一次运行在进行中，稍等片刻再试。")
-            return
         if result["seeded"]:
             yield event.plain_result(
                 f"首次运行：已把当前 {result['new']} 条记为基线，本次不推送"
@@ -139,9 +130,6 @@ class CommandsMixin:
 
         # 全程不过库：不看条目库、不写条目库、也不插【即将截止】
         result = await self._run_once(dry_run=True, with_deadline_alert=False)
-        if result["skipped"]:
-            yield event.plain_result("已经有一次运行在进行中，稍等片刻再试。")
-            return
         if not result["text"]:
             yield event.plain_result("（没有抓到任何内容，先检查源配置）")
             return
@@ -152,6 +140,21 @@ class CommandsMixin:
         """把库里所有没过去的都发一遍，顺便看看有没有新抓到的。"""
         if self._deny(event):
             return
+
+        # 和 /digest 一样要冷却：它也会跑一次 only_new，有新通知就调模型。
+        # 缓存键加 :all 后缀，免得和 /digest 那份互相覆盖。
+        key = str(getattr(event, "unified_msg_origin", "") or "") + ":all"
+        cooldown = self._cfg_int("query_cooldown_seconds", 120)
+        cached = self._query_cache.get(key)
+        if cached and cooldown > 0:
+            waited = time.monotonic() - cached[0]
+            if waited < cooldown:
+                note = (f"距上次生成才 {int(waited)} 秒，先看这一份"
+                        f"（{cooldown} 秒后可再算）：")
+                async for r in self._emit_digest(event, cached[1], note=note):
+                    yield r
+                return
+
         today = self._today()
         entries = await self._store.get_entries()
         limit = self._cfg_int("no_due_expire_days", 30)
@@ -171,9 +174,6 @@ class CommandsMixin:
             with_deadline_alert=False,
             keep_entries=True,
         )
-        if result["skipped"]:
-            yield event.plain_result("刚好在生成简报，稍等十几秒再来。")
-            return
 
         merged = list(valid)
         if result["new"] > 0 and result["text"]:
@@ -181,6 +181,13 @@ class CommandsMixin:
             parsed = split_entries(result["text"])
             if parsed:
                 merged = merged + self._to_records(parsed, [], today)
+
+        # 库大了不能一次全倒出来（节点数会超上限、退回纯文本）
+        cap = self._cfg_int("query_all_max_items", 40)
+        dropped = 0
+        if cap > 0 and len(merged) > cap:
+            dropped = len(merged) - cap
+            merged = merged[:cap]
 
         body = self._digester.render_from_entries(merged)
         if not body:
@@ -192,6 +199,11 @@ class CommandsMixin:
         if due:
             head = head + chr(10) * 2 + self._digester.render_due_soon(due)
         text = head + chr(10) * 2 + body
+        if dropped:
+            text += (chr(10) * 2 + "（还有 " + str(dropped)
+                     + " 条没列出来；调大面板里的 query_all_max_items 可以多看一些）")
+        if cooldown > 0:
+            self._query_cache[key] = (time.monotonic(), text)
         async for r in self._emit_digest(event, text):
             yield r
 

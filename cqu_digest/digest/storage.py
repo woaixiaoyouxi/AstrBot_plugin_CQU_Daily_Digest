@@ -4,6 +4,7 @@ AstrBot 的 get_kv_data/put_kv_data 是插件作用域的，落 SQLite，
 这里只做键名统一、类型兜底和容量裁剪。
 """
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -12,11 +13,15 @@ GetKV = Callable[[str, object], Awaitable[object]]
 PutKV = Callable[[str, object], Awaitable[None]]
 
 KEY_SEEN_IDS = "seen_ids"
+"""已经【推给管理员看过】的通知 id 清单。
+
+它的用途就一个：推送时回答「哪些是新的」（新的 = 不在这张清单里的）。
+顺带被 /digest 的增量判断和到期提醒借用 —— 提醒只对清单里的生效，
+也就是用户定义的「已经被推送过一遍」。
+"""
 KEY_LAST_RUN_DATE = "last_run_date"
 KEY_LAST_DIGEST = "digest_last"
 KEY_GROUP_BUFFER = "group_buffer"
-KEY_LAST_PUBLIC = "digest_last_public"
-"""公开口径的最近一份简报（不含群消息）。"""
 
 KEY_ENTRIES = "entries"
 """条目库：{id: {cat, title, fields, times, link, published, due, first_seen, last_seen}}
@@ -48,6 +53,10 @@ class DigestStore:
     def __init__(self, get_kv_data: GetKV, put_kv_data: PutKV):
         self._get = get_kv_data
         self._put = put_kv_data
+        # 保护「读全表 -> 改 -> 整表写回」这组操作。
+        # ★ 只加在顶层方法上：set_entries/get_entries 会在锁内被调用，
+        #   而 asyncio.Lock 不可重入，给它们也加锁会死锁。
+        self._lock = asyncio.Lock()
 
     # ── 已推条目去重 ────────────────────────────────────────────
 
@@ -75,13 +84,6 @@ class DigestStore:
 
     # ── 最近一次简报（调试用）──────────────────────────────────
 
-    async def get_last_public_digest(self) -> str:
-        """公开口径的最近一份（不含群消息）。"""
-        value = await self._get(KEY_LAST_PUBLIC, "")
-        return str(value) if value else ""
-
-    async def set_last_public_digest(self, text: str) -> None:
-        await self._put(KEY_LAST_PUBLIC, text)
 
     async def get_last_digest(self) -> str:
         value = await self._get(KEY_LAST_DIGEST, "")
@@ -124,6 +126,10 @@ class DigestStore:
 
         published 只在新入库时写，已存在的一律保留旧值（见 KEY_ENTRIES 的说明）。
         """
+        async with self._lock:
+            return await self._upsert_locked(records, today)
+
+    async def _upsert_locked(self, records: list[dict[str, Any]], today: str) -> int:
         entries = await self.get_entries()
         added = 0
         for rec in records:
@@ -155,6 +161,11 @@ class DigestStore:
           · 有截止日的：截止日过了 grace_days 天以上 -> 清
           · 没截止日的：入库超过 no_due_expire_days 天 -> 清（无截止销毁）
         """
+        async with self._lock:
+            return await self._prune_locked(today, no_due_expire_days, grace_days)
+
+    async def _prune_locked(self, today: str, no_due_expire_days: int,
+                            grace_days: int) -> int:
         entries = await self.get_entries()
         due_floor = shift_date(today, -grace_days)
         no_due_floor = shift_date(today, -no_due_expire_days)
@@ -174,7 +185,8 @@ class DigestStore:
         return removed
 
     async def clear_entries(self) -> None:
-        await self._put(KEY_ENTRIES, {})
+        async with self._lock:
+            await self._put(KEY_ENTRIES, {})
 
     # ── 内部 ────────────────────────────────────────────────────
 

@@ -162,6 +162,12 @@
                 "default": true,
                 "hint": "开：群友发 /digest 查到新通知时，给 command_allow_from 里的管理员私聊发一句「群友查到新的消息了！」再附上同一份卡片。发成功后那条会记进去重基线，定时推送不会再推它一遍；发失败就不记，留给定时补"
             },
+            "query_all_max_items": {
+                "description": "/digest all 最多列几条",
+                "type": "int",
+                "default": 40,
+                "hint": "库里的条目按分类顺序取前 N 条。调太大容易超过合并转发的节点上限而退回纯文本；超出的部分会提示「还有 N 条没列出来」。填 0 = 不限"
+            },
             "query_cooldown_seconds": {
                 "description": "查询冷却（秒）",
                 "type": "int",
