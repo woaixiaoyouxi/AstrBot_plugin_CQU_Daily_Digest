@@ -22,6 +22,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from cqu_digest.digest import blocks as block_utils
 from cqu_digest.digest.storage import DigestStore
 
 TEXT_LIMIT = 300
@@ -175,76 +176,20 @@ class GroupCollector:
         return recent
 
     async def blocks(self) -> list[dict[str, Any]]:
-        """把缓冲里的扁平消息聚成"通知块"，并处理"结"。
+        """把缓冲里的扁平消息聚成「通知块」，并处理「结」。
 
-        聚合规则：同一个群 + 相邻两条间隔不超过 group_aggregate_minutes 分钟，
-                  （可选）并且是同一个人发的。
+        这里只干两件 IO 的事：读群缓冲、读配置。
+        分块和「结」的算法在 blocks.py —— 那边是纯函数，能脱离 AstrBot 单独测。
 
-        为什么要「同一个人」：只看时间的话，通知后面的群友回复（「收到」
-        「我也想去」）会落进同一个窗口，整块被模型判成「是通知」一起转出去。
-        代价是两个人接力发的一条通知会被拆开 —— 但拆开只是分成两条、不丢内容，
-        所以留了开关 group_block_same_sender 能关掉。
-
-        "结"关块三种情况：
-          引用回复某条 -> 关掉被引用那条所在的块
-          跟在通知后面 -> 关掉自己所在的块
-          单独发一条   -> 关掉该群里上一个还没关的块
-
-        closed 的块照样返回（调用方自己决定滤不滤），
-        好让"先只记录、观察它实际怎么发"的阶段不用再改代码。
+        closed 的块照样返回（调用方自己决定滤不滤）。
         返回 [{"gid","ts","last_ts","items","closed"}]
         """
         buffer = await self.peek_recent()
         if not buffer:
             return []
-
         gap = max(1, self._aggregate_minutes()) * 60
-        ordered = sorted(buffer, key=lambda item: int(item.get("ts", 0)))
-
-        same_sender = self._block_same_sender()
-        blocks: list[dict[str, Any]] = []
-        for item in ordered:
-            gid = str(item.get("gid", ""))
-            ts = int(item.get("ts", 0))
-            cur = blocks[-1] if blocks else None
-            joinable = (
-                cur is not None
-                and cur["gid"] == gid
-                and ts - cur["last_ts"] <= gap
-            )
-            if joinable and same_sender and cur["items"]:
-                last_sender = str(cur["items"][-1].get("sender", ""))
-                joinable = last_sender == str(item.get("sender", ""))
-            if joinable:
-                cur["items"].append(item)
-                cur["last_ts"] = ts
-            else:
-                blocks.append({"gid": gid, "ts": ts, "last_ts": ts,
-                               "items": [item], "closed": False})
-
-        by_mid = {}
-        for index, block in enumerate(blocks):
-            for item in block["items"]:
-                mid = str(item.get("mid", "") or "")
-                if mid:
-                    by_mid[mid] = index
-
-        for index, block in enumerate(blocks):
-            for pos, item in enumerate(block["items"]):
-                if not item.get("is_end"):
-                    continue
-                target = by_mid.get(str(item.get("reply_to", "") or ""))
-                if target is not None:
-                    blocks[target]["closed"] = True
-                    continue
-                if pos > 0:
-                    block["closed"] = True
-                    continue
-                for j in range(index - 1, -1, -1):
-                    if blocks[j]["gid"] == block["gid"] and not blocks[j]["closed"]:
-                        blocks[j]["closed"] = True
-                        break
-        return blocks
+        grouped = block_utils.group_into_blocks(buffer, gap, self._block_same_sender())
+        return block_utils.mark_closed(grouped)
 
     async def consume_recent(self) -> list[dict[str, Any]]:
         """取窗口内的群消息并从缓冲里删掉，避免下一天重复喂给 LLM。
