@@ -81,6 +81,8 @@ class CquDailyDigestPlugin(
         self._query_cache: dict[str, tuple[float, str]] = {}
         # 机器人自己的 QQ 号：event 触发时拿到就存起来，定时推送时用它
         self._cached_self_id = ""
+        # 正在跑 + 在排队的流水线数（排队提示要报位置）
+        self._waiting = 0
         # 合并转发失败的原因（降级提示要说清）
         self._forward_fail_reason = ""
 

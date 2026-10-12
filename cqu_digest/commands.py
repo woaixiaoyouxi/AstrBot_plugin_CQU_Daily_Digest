@@ -9,6 +9,9 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.fetch.sources import format_source_lines, unconfigured_keys
 from cqu_digest.digest.entries import is_valid, split_entries
 
+QUEUE_LIMIT = 3
+"""排队的忍耐上限。超过就劝退——不然连点会把队列堆起来。"""
+
 QUERY_RECENT_DAYS = 3
 """公开查询只看最近几天的通知（没有已读基线，不卡窗口会倒出整站历史）。"""
 
@@ -39,6 +42,12 @@ class CommandsMixin:
                     yield r
                 return
 
+        note, go = self._queue_notice()
+        if note:
+            yield event.plain_result(note)
+        if not go:
+            return
+
         days = self._cfg_int("query_recent_days", 30)
         result = await self._run_once(
             dry_run=True,
@@ -62,6 +71,16 @@ class CommandsMixin:
         async for r in self._emit_digest(event, text, blocks=result.get("blocks")):
             yield r
 
+    def _queue_notice(self):
+        """返回 (要发给用户的提示, 还能不能继续跑)。没提示就是 ("", True)。"""
+        ahead = self._queue_ahead()
+        if ahead <= 0:
+            return "", True
+        if ahead > QUEUE_LIMIT:
+            return ("排队的人太多了（前面 " + str(ahead) + " 个），过一会儿再来吧。", False)
+        return ("已收到请求，目前排队在第 " + str(ahead + 1) + " 位（前面还有 "
+                + str(ahead) + " 个在跑），请稍后…", True)
+
     async def _cmd_help(self, event: AstrMessageEvent):
         """查看使用说明。"""
         if self._deny(event):
@@ -72,6 +91,12 @@ class CommandsMixin:
         """立即跑一次完整流程并推送。"""
         if self._deny(event, admin_only=True):
             return
+        note, go = self._queue_notice()
+        if note:
+            yield event.plain_result(note)
+        if not go:
+            return
+
         result = await self._run_once()
         if result["skipped"]:
             yield event.plain_result("已经有一次运行在进行中，稍等片刻再试。")
@@ -97,6 +122,12 @@ class CommandsMixin:
         """
         if self._deny(event, admin_only=True):
             return
+        note, go = self._queue_notice()
+        if note:
+            yield event.plain_result(note)
+        if not go:
+            return
+
         # 全程不过库：不看条目库、不写条目库、也不插【即将截止】
         result = await self._run_once(dry_run=True, with_deadline_alert=False)
         if result["skipped"]:
@@ -116,6 +147,12 @@ class CommandsMixin:
         entries = await self._store.get_entries()
         limit = self._cfg_int("no_due_expire_days", 30)
         valid = [r for r in entries.values() if is_valid(r, today, limit)]
+
+        note, go = self._queue_notice()
+        if note:
+            yield event.plain_result(note)
+        if not go:
+            return
 
         # 顺便检测有没有新信息。走 only_new，且不插提醒（提醒下面自己插一次）
         result = await self._run_once(

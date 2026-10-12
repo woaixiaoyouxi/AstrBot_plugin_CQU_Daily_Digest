@@ -29,6 +29,10 @@ class PipelineMixin:
         return {"text": text, "new": new, "pushed": pushed, "seeded": seeded,
                 "skipped": skipped, "blocks": blocks or []}
 
+    def _queue_ahead(self) -> int:
+        """我前面还有几个在跑/在等（0 = 轮子空着，直接能跑）。"""
+        return max(0, int(getattr(self, "_waiting", 0)))
+
     async def _run_once(
         self,
         *,
@@ -39,23 +43,25 @@ class PipelineMixin:
         with_deadline_alert: bool = True,
         keep_entries: bool = False,
     ) -> dict[str, Any]:
-        """跑一次完整流程。
+        """跑一次完整流程。前面有一次在跑就【排队等】，不直接拒绝。
 
-        已有一次在跑就直接跳过——两条流水线并发会读到同一份 seen_ids，
-        算出同一批「新增」，然后推两遍。
+        （以前是直接跳过：两条流水线并发会读到同一份 seen_ids、算出同一批
+          「新增」然后推两遍。现在改成串行排队，靠 _run_lock 保证只跑一个；
+          前面有几个人用 _waiting 报给调用方。）
         """
-        if self._run_lock.locked():
-            logger.info("[简报] 已有一次运行在进行中，本次跳过")
-            return self._result(skipped=True)
-        async with self._run_lock:
-            return await self._run_pipeline(
-                dry_run=dry_run,
-                recent_days=recent_days,
-                with_group_messages=with_group_messages,
-                only_new=only_new,
-                with_deadline_alert=with_deadline_alert,
-                keep_entries=keep_entries,
-            )
+        self._waiting += 1
+        try:
+            async with self._run_lock:
+                return await self._run_pipeline(
+                    dry_run=dry_run,
+                    recent_days=recent_days,
+                    with_group_messages=with_group_messages,
+                    only_new=only_new,
+                    with_deadline_alert=with_deadline_alert,
+                    keep_entries=keep_entries,
+                )
+        finally:
+            self._waiting -= 1
 
     async def _run_pipeline(
         self,
