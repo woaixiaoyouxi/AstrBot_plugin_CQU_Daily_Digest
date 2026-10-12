@@ -1,7 +1,9 @@
 """指令实现。分派在 main.py 的 digest_entry 里。"""
 import asyncio
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 from typing import Any
 
 from astrbot.api import logger
@@ -11,21 +13,41 @@ from cqu_digest.digest.entries import is_valid, split_entries, to_records
 from cqu_digest.push import ZWSP
 
 
+class QueryGate(Enum):
+    """公开查询的前半段跑完之后，只可能是这三种去向。"""
+
+    STOP = "stop"        # 别继续了（没权限，或队列满被劝退）——该发的提示已经发过
+    CACHED = "cached"    # 冷却期内命中缓存，把上次那份发出去就行
+    RUN = "run"          # 可以真跑了
+
+
+@dataclass
+class QueryGateResult:
+    """_public_query_gate 的返回值。
+
+    用具名 dataclass 而不是元组或者魔法字符串：
+    调用方读 gate.text / gate.key 一眼就知道是什么，以后加字段也不会打乱顺序。
+    """
+
+    gate: QueryGate
+    key: str = ""
+    cooldown: int = 0
+    note: str = ""
+    text: str = ""
+
+
 class CommandsMixin:
-    async def _cmd_query(self, event: AstrMessageEvent):
-        """公开查询：现算一份给当前会话。
+    async def _public_query_gate(self, event: AstrMessageEvent,
+                                 key_suffix: str = "") -> QueryGateResult:
+        """公开查询的前半段：权限 -> 冷却 -> 排队。多个入口共用这一份。
 
-        只查【增量】：跟 seen_ids 比，有新通知才现算一份；
-        一条新的都没有就直接回「新增 0 条」，连模型都不调。
-
-        走 dry_run——不推送、不写 seen_ids、不消费群缓冲，所以外人刷它不会
-        动到他的增量基线。按 umo 记冷却，冷却期内直接回上一次算好的那份，
-        避免有人连点把 API 额度烧穿。
+        抽出来的理由：/digest 和 /digest all 这段原来逐字相同、各写各的，
+        上次给 all 补冷却就是因为漏改了一处。
         """
         if self._deny(event):
-            return
+            return QueryGateResult(QueryGate.STOP)
 
-        key = str(getattr(event, "unified_msg_origin", "") or "")
+        key = str(getattr(event, "unified_msg_origin", "") or "") + key_suffix
         cooldown = self._cfg_int("query_cooldown_seconds", 120)
         cached = self._query_cache.get(key)
         if cached and cooldown > 0:
@@ -33,11 +55,27 @@ class CommandsMixin:
             if waited < cooldown:
                 note = (f"距上次生成才 {int(waited)} 秒，先看这一份"
                         f"（{cooldown} 秒后可再算）：")
-                async for r in self._emit_digest(event, cached[1], note=note):
-                    yield r
-                return
+                return QueryGateResult(QueryGate.CACHED, note=note, text=cached[1])
 
         if not await self._ack_and_check_queue(event):
+            return QueryGateResult(QueryGate.STOP)
+        return QueryGateResult(QueryGate.RUN, key=key, cooldown=cooldown)
+
+    async def _cmd_query(self, event: AstrMessageEvent):
+        """公开查询（增量）：有新通知才现算一份，没有就直接回「新增 0 条」。
+
+        走 dry_run——不推送、不写 seen_ids、不消费群缓冲，所以外人刷它不会
+        动到他的增量基线。权限、冷却、排队都在 _public_query_gate 里。
+
+        唯一会写 seen_ids 的例外：通知管理员成功之后补写那批 new_ids ——
+        因为那条确实送到他手上了，不写的话定时推送会再推一遍。
+        """
+        gate = await self._public_query_gate(event)
+        if gate.gate is QueryGate.STOP:
+            return
+        if gate.gate is QueryGate.CACHED:
+            async for r in self._emit_digest(event, gate.text, note=gate.note):
+                yield r
             return
 
         days = self._cfg_int("query_recent_days", 30)
@@ -55,17 +93,12 @@ class CommandsMixin:
             return
 
         text = result["text"]
-
         # 群友这次查到了新通知 -> 也给管理员发一份（提示 + 同一份卡片）
-        if result["new"] > 0:
-            ok_admin = await self._notify_admin_new(
-                event, text, result.get("blocks"))
-            if ok_admin:
-                # 确实送到他手上了 -> 记进 seen_ids，免得定时推送再推一遍
-                await self._store.add_seen_ids(result.get("new_ids") or [])
+        if await self._notify_admin_new(event, text, result.get("blocks")):
+            await self._store.add_seen_ids(result.get("new_ids") or [])
 
-        if cooldown > 0:
-            self._query_cache[key] = (time.monotonic(), text)
+        if gate.cooldown > 0:
+            self._query_cache[gate.key] = (time.monotonic(), text)
         async for r in self._emit_digest(event, text, blocks=result.get("blocks")):
             yield r
 
@@ -145,31 +178,23 @@ class CommandsMixin:
             yield r
 
     async def _cmd_query_all(self, event: AstrMessageEvent):
-        """把库里所有没过去的都发一遍，顺便看看有没有新抓到的。"""
-        if self._deny(event):
-            return
+        """把库里所有没过去的都发一遍，顺便看看有没有新抓到的。
 
-        # 和 /digest 一样要冷却：它也会跑一次 only_new，有新通知就调模型。
-        # 缓存键加 :all 后缀，免得和 /digest 那份互相覆盖。
-        key = str(getattr(event, "unified_msg_origin", "") or "") + ":all"
-        cooldown = self._cfg_int("query_cooldown_seconds", 120)
-        cached = self._query_cache.get(key)
-        if cached and cooldown > 0:
-            waited = time.monotonic() - cached[0]
-            if waited < cooldown:
-                note = (f"距上次生成才 {int(waited)} 秒，先看这一份"
-                        f"（{cooldown} 秒后可再算）：")
-                async for r in self._emit_digest(event, cached[1], note=note):
-                    yield r
-                return
+        缓存键带 :all 后缀 —— 它和 /digest 共用同一套冷却参数、但各存各的那份，
+        否则两边会互相覆盖。
+        """
+        gate = await self._public_query_gate(event, key_suffix=":all")
+        if gate.gate is QueryGate.STOP:
+            return
+        if gate.gate is QueryGate.CACHED:
+            async for r in self._emit_digest(event, gate.text, note=gate.note):
+                yield r
+            return
 
         today = self._today()
         entries = await self._store.get_entries()
         limit = self._cfg_int("no_due_expire_days", 30)
         valid = [r for r in entries.values() if is_valid(r, today, limit)]
-
-        if not await self._ack_and_check_queue(event):
-            return
 
         # 顺便检测有没有新信息。走 only_new，且不插提醒（提醒下面自己插一次）
         result = await self._run_once(
@@ -207,8 +232,8 @@ class CommandsMixin:
         if dropped:
             text += (chr(10) * 2 + "（还有 " + str(dropped)
                      + " 条没列出来；调大面板里的 query_all_max_items 可以多看一些）")
-        if cooldown > 0:
-            self._query_cache[key] = (time.monotonic(), text)
+        if gate.cooldown > 0:
+            self._query_cache[gate.key] = (time.monotonic(), text)
         async for r in self._emit_digest(event, text):
             yield r
 
