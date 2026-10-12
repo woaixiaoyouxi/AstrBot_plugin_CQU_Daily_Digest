@@ -23,12 +23,13 @@ class PipelineMixin:
         pushed: bool = False,
         seeded: bool = False,
         skipped: bool = False,
+        sent: int = 0,
         blocks: list | None = None,
         new_ids: list | None = None,
     ) -> dict[str, Any]:
         """统一返回值形状——调用方固定读这几个键，别各写各的 dict。"""
         return {"text": text, "new": new, "pushed": pushed, "seeded": seeded,
-                "skipped": skipped, "blocks": blocks or [],
+                "skipped": skipped, "sent": sent, "blocks": blocks or [],
                 "new_ids": new_ids or []}
 
     def _queue_ahead(self) -> int:
@@ -179,6 +180,7 @@ class PipelineMixin:
             text = self._digester.truncate(text)
 
         pushed = False
+        sent = 0
         if not dry_run:
             # ★ digest_last 是「上次真推出去的原文」——推出去的形态是
             #   占位符已经展开的，所以存的也该是展开后的。不然接上
@@ -192,7 +194,9 @@ class PipelineMixin:
                 # 当成新的、整站历史一次性刷给他。
                 await self._store.add_seen_ids([item["id"] for item in notices])
             else:
-                pushed = await self._push(text, group_messages)
+                sent_count = await self._push(text, group_messages)
+                sent = sent_count
+                pushed = sent_count > 0
                 if pushed:
                     # ★ 只记「真正呈现出去的那批」。
                     #   以前记的是抓到的全量，超上限的那些既没推给他、
@@ -207,6 +211,7 @@ class PipelineMixin:
             await self._store.set_last_run_date(self._today())
 
         return self._result(text=text, new=len(model_feed), pushed=pushed, seeded=seeded,
+                              sent=sent,
                               blocks=group_messages,
                               new_ids=new_ids)
 
@@ -258,7 +263,16 @@ class PipelineMixin:
                     if text:
                         item["body"] = text
 
-            await asyncio.gather(*(fill(item) for item in targets), return_exceptions=True)
+            results = await asyncio.gather(*(fill(item) for item in targets),
+                                           return_exceptions=True)
+            # ★ return_exceptions=True 会把异常当成【返回值】交回来，不看就丢了。
+            #   fetch_article_text 自己的失败它内部记过日志，这里是外层的兜底。
+            for item, outcome in zip(targets, results):
+                if isinstance(outcome, BaseException):
+                    logger.warning(
+                        f"[简报] 补正文时出意外（{item.get('link', '')}）："
+                        f"{type(outcome).__name__}: {outcome}"
+                    )
 
     def _wants_body(self, category: str) -> bool:
         if category == "campus":

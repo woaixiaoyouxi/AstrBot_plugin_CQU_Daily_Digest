@@ -13,19 +13,29 @@ ZWSP = "\u200b"
 
 
 class PushMixin:
-    async def _push(self, text: str, blocks: list | None = None) -> bool:
+    async def _push(self, text: str, blocks: list | None = None) -> int:
+        """推送，返回【成功发出去的会话数】。
+
+        ★ 用计数而不是 bool：多目标时原来只要有一个成功就返回 True，
+          用户看到「已推送」，另一个目标的失败只留在日志里 ——
+          而日志文件默认是关的，他看不到。
+        """
         if not self._cfg_bool("push_enabled", True):
             logger.info("[简报] push_enabled 关着，本次不推送（抓取和记账照常）")
-            return False
+            return 0
         targets = self._push_targets()
         if not targets:
             logger.warning("[简报] 没有推送目标，本次简报只写进了 digest_last")
-            return False
+            return 0
 
-        sent = False
+        sent = 0
         for umo in targets:
             if await self._send_one(umo, text, blocks):
-                sent = True
+                sent += 1
+            else:
+                logger.warning(f"[简报] 会话 {umo} 没发出去")
+        if sent < len(targets):
+            logger.warning(f"[简报] 推送目标 {len(targets)} 个，只有 {sent} 个成功")
         return sent
 
     async def _send_one(self, umo: str, text: str, blocks: list | None = None,

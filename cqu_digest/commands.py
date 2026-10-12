@@ -189,7 +189,10 @@ class CommandsMixin:
             async for r in self._emit_digest(event, result["text"], note=note, blocks=result.get("blocks")):
                 yield r
             return
-        yield event.plain_result(f"已推送，本次新增 {result['new']} 条。")
+        yield event.plain_result(
+            "已推送到 " + str(result.get("sent", 0)) + " 个会话，本次新增 "
+            + str(result["new"]) + " 条。"
+        )
 
     async def _cmd_test(self, event: AstrMessageEvent):
         """完整重走一遍：抓网页 + 调模型。全程不过库。
