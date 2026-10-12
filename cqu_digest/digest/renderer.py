@@ -28,9 +28,6 @@ CATEGORY_ORDER = ("campus", "competition")
 SECTION_GAP = "\n\n\n\n"
 """分类之间的空行——换行符+3 个空行。"""
 
-PREFERRED_CATEGORIES = ("【校内通知】", "【竞赛】", "【群消息转发】")
-"""拼库里的条目时的分类顺序。清单里没有的分类按出现顺序排在后面。"""
-
 SYSTEM_PROMPT = """你在为一名重庆大学计算机学院的本科生整理「每日简报」。
 
 先做相关性筛选，这一步最重要：
@@ -361,64 +358,6 @@ class Digester:
                 tail = chr(10).join(lines[i:]).strip()
                 return head + chr(10) * 2 + section.strip() + chr(10) * 2 + tail
         return text.rstrip() + chr(10) * 2 + section.strip()
-
-    @classmethod
-    def render_from_entries(cls, records: list) -> str:
-        """直接把条目记录拼成简报正文（不调模型）。
-
-        /digest all 用它：库里的东西本来就是结构化的，重新拼一遍就行 ——
-        这正是"让模型输出统一格式"换来的好处。
-        """
-        if not records:
-            return ""
-        grouped: dict[str, list] = {}
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            grouped.setdefault(str(record.get("cat", "") or ""), []).append(record)
-
-        order = [c for c in PREFERRED_CATEGORIES if c in grouped]
-        for cat in grouped:
-            if cat not in order:
-                order.append(cat)
-
-        blocks = []
-        for cat in order:
-            items = grouped.get(cat) or []
-            if not items:
-                continue
-            lines = [cat, SEP_LINE] if cat else [SEP_LINE]
-            for record in items:
-                lines.append(cls.entry_block_text(record))
-                lines.append("")
-            blocks.append(chr(10).join(lines).rstrip())
-        return (chr(10) * 3).join(blocks)
-
-    @staticmethod
-    def entry_block_text(record: dict) -> str:
-        """一条记录拼回六件套（和模型输出的格式完全一致）。"""
-        lines = ["[" + str(record.get("title", "")) + "]"]
-        fields = record.get("fields") or {}
-        brief = fields.get("内容简述")
-        if brief:
-            lines.append("内容简述：" + str(brief))
-        for slot in record.get("times") or []:
-            if not isinstance(slot, dict):
-                continue
-            iso = str(slot.get("date", "") or "")
-            raw = short_date(iso) if iso else str(slot.get("raw", "") or "")
-            if not raw:
-                continue
-            note = str(slot.get("note", "") or "")
-            lines.append("时间：" + raw + (("（" + note + "）") if note else ""))
-            place = str(slot.get("place", "") or "")
-            if place:
-                lines.append("地点：" + place)
-        for name in ("链接", "要求", "能获得什么"):
-            value = fields.get(name)
-            if value:
-                lines.append(name + "：" + str(value))
-        return chr(10).join(lines)
 
     def _fallback_render(
         self,

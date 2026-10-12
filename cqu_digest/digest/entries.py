@@ -285,3 +285,69 @@ def split_entries(text: str) -> list:
         entry["time"] = earliest_time(entry)
         entry["due"] = earliest_due(entry)
     return out
+
+
+PREFERRED_CATEGORIES = ("【校内通知】", "【竞赛】", "【群消息转发】")
+"""拼库里的条目时的分类顺序。清单里没有的分类按出现顺序排在后面。"""
+
+
+def entry_block_text(record: dict) -> str:
+    """一条记录拼回六件套 —— 和 split_entries 互为逆操作。
+
+    ★ 两个刻意放在同一个文件里：以后改条目格式必须同时改这两个，
+      分开写迟早漏一边（改了一边、另一边就解析不回来，而且是静默的）。
+    """
+    lines = ["[" + str(record.get("title", "")) + "]"]
+    fields = record.get("fields") or {}
+    brief = fields.get("内容简述")
+    if brief:
+        lines.append("内容简述：" + str(brief))
+    for slot in record.get("times") or []:
+        if not isinstance(slot, dict):
+            continue
+        iso = str(slot.get("date", "") or "")
+        raw = short_date(iso) if iso else str(slot.get("raw", "") or "")
+        if not raw:
+            continue
+        note = str(slot.get("note", "") or "")
+        lines.append("时间：" + raw + (("（" + note + "）") if note else ""))
+        place = str(slot.get("place", "") or "")
+        if place:
+            lines.append("地点：" + place)
+    for name in ("链接", "要求", "能获得什么"):
+        value = fields.get(name)
+        if value:
+            lines.append(name + "：" + str(value))
+    return chr(10).join(lines)
+
+
+def render_from_entries(records: list) -> str:
+    """把一批记录拼成简报正文（按分类分组）。
+
+    这是从 renderer 搬过来的 —— 它和 split_entries / entry_block_text
+    是同一套格式的两端，放一起才不会改漏。
+    """
+    if not records:
+        return ""
+    grouped: dict = {}
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        grouped.setdefault(str(record.get("cat", "") or ""), []).append(record)
+
+    order = [c for c in PREFERRED_CATEGORIES if c in grouped]
+    for cat in grouped:
+        if cat not in order:
+            order.append(cat)
+
+    blocks = []
+    for cat in order:
+        items = grouped.get(cat) or []
+        if not items:
+            continue
+        lines = [cat, SEP_LINE] if cat else [SEP_LINE]
+        for record in items:
+            lines.append(entry_block_text(record))
+            lines.append("")
+        blocks.append(chr(10).join(lines).rstrip())
+    return (chr(10) * 3).join(blocks)

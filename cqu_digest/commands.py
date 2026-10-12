@@ -9,7 +9,8 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.fetch.sources import format_source_lines, unconfigured_keys
-from cqu_digest.digest.entries import is_valid, split_entries, to_records
+from cqu_digest.digest.entries import (is_valid, render_from_entries,
+                                           split_entries, to_records)
 from cqu_digest.push import ZWSP
 
 
@@ -219,7 +220,7 @@ class CommandsMixin:
             dropped = len(merged) - cap
             merged = merged[:cap]
 
-        body = self._digester.render_from_entries(merged)
+        body = render_from_entries(merged)
         if not body:
             yield event.plain_result("条目库还是空的 —— 等下一次推送之后再来。")
             return
