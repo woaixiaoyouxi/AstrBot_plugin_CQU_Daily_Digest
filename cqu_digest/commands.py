@@ -45,6 +45,7 @@ class CommandsMixin:
             recent_days=days,
             with_group_messages=True,
             only_new=True,
+            keep_entries=True,
         )
         if result["skipped"]:
             yield event.plain_result("刚好在生成简报，稍等十几秒再来。")
@@ -122,6 +123,7 @@ class CommandsMixin:
             only_new=True,
             with_group_messages=True,
             with_deadline_alert=False,
+            keep_entries=True,
         )
         if result["skipped"]:
             yield event.plain_result("刚好在生成简报，稍等十几秒再来。")

@@ -37,6 +37,7 @@ class PipelineMixin:
         with_group_messages: bool = True,
         only_new: bool = False,
         with_deadline_alert: bool = True,
+        keep_entries: bool = False,
     ) -> dict[str, Any]:
         """跑一次完整流程。
 
@@ -53,6 +54,7 @@ class PipelineMixin:
                 with_group_messages=with_group_messages,
                 only_new=only_new,
                 with_deadline_alert=with_deadline_alert,
+                keep_entries=keep_entries,
             )
 
     async def _run_pipeline(
@@ -63,6 +65,7 @@ class PipelineMixin:
         with_group_messages: bool = True,
         only_new: bool = False,
         with_deadline_alert: bool = True,
+        keep_entries: bool = False,
     ) -> dict[str, Any]:
         """跑一次完整流程。dry_run 不推送、不写 seen_ids（调试源 / 公开查询用）。
 
@@ -71,6 +74,12 @@ class PipelineMixin:
 
         with_deadline_alert：要不要插【即将截止】那一段。
         test 传 False（它要全程不过库，而提醒是读库来的）。
+
+        keep_entries：dry_run 也【写条目库】。查询（/digest、/digest all）走这条 ——
+        它确实「见过」这些通知，存下来 /digest all 才更全。
+        ★ 但它【绝不写 seen_ids】：群友查一次就记成「已推送」的话，
+          以后真推送会把那条当旧的跳过 —— 你反而收不到它。
+        test 不传这个（它要全程不过库）。
         """
         categories = self._enabled_categories()
         notices = await self._fetcher.fetch_notices(categories=categories) if categories else []
@@ -112,7 +121,7 @@ class PipelineMixin:
 
         # 解析入库。只有【真跑】才写库 —— 库的语义是"已推送给他的账本"，
         # 所以 /digest 和 test（都是 dry_run）一个字都不写。
-        if not dry_run and text:
+        if (not dry_run or keep_entries) and text:
             parsed = split_entries(text)
             if parsed:
                 added = await self._store.upsert_entries(
