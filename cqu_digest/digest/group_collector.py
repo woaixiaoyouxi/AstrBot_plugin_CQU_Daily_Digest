@@ -177,9 +177,13 @@ class GroupCollector:
     async def blocks(self) -> list[dict[str, Any]]:
         """把缓冲里的扁平消息聚成"通知块"，并处理"结"。
 
-        聚合规则：同一个群 + 相邻两条间隔不超过 group_aggregate_minutes 分钟。
-        （用户 2026-10-12："通知群的消息格式一般是 消息1+消息2+图"，
-          所以得整块看，一条一条看会把一条完整通知拆散。）
+        聚合规则：同一个群 + 相邻两条间隔不超过 group_aggregate_minutes 分钟，
+                  （可选）并且是同一个人发的。
+
+        为什么要「同一个人」：只看时间的话，通知后面的群友回复（「收到」
+        「我也想去」）会落进同一个窗口，整块被模型判成「是通知」一起转出去。
+        代价是两个人接力发的一条通知会被拆开 —— 但拆开只是分成两条、不丢内容，
+        所以留了开关 group_block_same_sender 能关掉。
 
         "结"关块三种情况：
           引用回复某条 -> 关掉被引用那条所在的块
@@ -197,17 +201,26 @@ class GroupCollector:
         gap = max(1, self._aggregate_minutes()) * 60
         ordered = sorted(buffer, key=lambda item: int(item.get("ts", 0)))
 
+        same_sender = self._block_same_sender()
         blocks: list[dict[str, Any]] = []
         for item in ordered:
             gid = str(item.get("gid", ""))
             ts = int(item.get("ts", 0))
-            if blocks and blocks[-1]["gid"] == gid and ts - blocks[-1]["last_ts"] <= gap:
-                cur = blocks[-1]
+            cur = blocks[-1] if blocks else None
+            joinable = (
+                cur is not None
+                and cur["gid"] == gid
+                and ts - cur["last_ts"] <= gap
+            )
+            if joinable and same_sender and cur["items"]:
+                last_sender = str(cur["items"][-1].get("sender", ""))
+                joinable = last_sender == str(item.get("sender", ""))
+            if joinable:
+                cur["items"].append(item)
+                cur["last_ts"] = ts
             else:
-                cur = {"gid": gid, "ts": ts, "last_ts": ts, "items": [], "closed": False}
-                blocks.append(cur)
-            cur["items"].append(item)
-            cur["last_ts"] = ts
+                blocks.append({"gid": gid, "ts": ts, "last_ts": ts,
+                               "items": [item], "closed": False})
 
         by_mid = {}
         for index, block in enumerate(blocks):
@@ -297,6 +310,10 @@ class GroupCollector:
     def _sender_name(message_obj: Any) -> str:
         sender = getattr(message_obj, "sender", None)
         return str(getattr(sender, "nickname", "") or "")
+
+    def _block_same_sender(self) -> bool:
+        """分块时要不要要求"同一个人发的"。面板：group_block_same_sender。"""
+        return bool(self.config.get("group_block_same_sender", True))
 
     def _aggregate_minutes(self) -> int:
         try:
