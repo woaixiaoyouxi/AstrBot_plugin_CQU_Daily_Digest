@@ -9,8 +9,7 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.fetch.sources import format_source_lines, unconfigured_keys
-from cqu_digest.digest.entries import (is_valid, render_from_entries,
-                                           split_entries, to_records)
+from cqu_digest.digest.entries import is_valid, render_from_entries
 from cqu_digest.push import ZWSP
 
 
@@ -35,6 +34,7 @@ class QueryGateResult:
     cooldown: int = 0
     note: str = ""
     text: str = ""
+    blocks: list | None = None
 
 
 class CommandsMixin:
@@ -56,7 +56,12 @@ class CommandsMixin:
             if waited < cooldown:
                 note = (f"距上次生成才 {int(waited)} 秒，先看这一份"
                         f"（{cooldown} 秒后可再算）：")
-                return QueryGateResult(QueryGate.CACHED, note=note, text=cached[1])
+                # ★ 缓存必须连 blocks 一起存：正文里「群消息转发」用的是
+                #   {{BLOCK:n}} 占位符，没有 blocks 就展不开 —— 整段会静默消失。
+                return QueryGateResult(
+                    QueryGate.CACHED, note=note, text=cached[1],
+                    blocks=(cached[2] if len(cached) > 2 else None),
+                )
 
         if not await self._ack_and_check_queue(event):
             return QueryGateResult(QueryGate.STOP)
@@ -75,7 +80,8 @@ class CommandsMixin:
         if gate.gate is QueryGate.STOP:
             return
         if gate.gate is QueryGate.CACHED:
-            async for r in self._emit_digest(event, gate.text, note=gate.note):
+            async for r in self._emit_digest(event, gate.text, note=gate.note,
+                                             blocks=gate.blocks):
                 yield r
             return
 
@@ -99,7 +105,7 @@ class CommandsMixin:
             await self._store.add_seen_ids(result.get("new_ids") or [])
 
         if gate.cooldown > 0:
-            self._query_cache[gate.key] = (time.monotonic(), text)
+            self._query_cache[gate.key] = (time.monotonic(), text, result.get("blocks"))
         async for r in self._emit_digest(event, text, blocks=result.get("blocks")):
             yield r
 
@@ -153,7 +159,17 @@ class CommandsMixin:
             )
             return
         if not result["pushed"]:
-            note = "简报已生成，但没有推送目标——去插件配置里填 push_targets。"
+            # ★ pushed=False 有三种成因，原来一律说「没配推送目标」——
+            #   后两种情况下用户会去查一个没问题的地方（日志文件默认还是关的）。
+            if not self._push_targets():
+                note = "简报已生成，但一个推送目标都没配 —— 去插件配置里填 push_targets。"
+            elif not self._cfg_bool("push_enabled", True):
+                note = "简报已生成，但定时推送的总开关（push_enabled）关着。"
+            else:
+                why = (getattr(self, "_forward_fail_reason", "")
+                       or "没拿到原因，看控制台日志")
+                note = ("简报已生成，但发送失败了：" + why
+                        + chr(10) + "（这次不记 seen_ids，下一轮会自动重试）")
             async for r in self._emit_digest(event, result["text"], note=note, blocks=result.get("blocks")):
                 yield r
             return
@@ -188,14 +204,13 @@ class CommandsMixin:
         if gate.gate is QueryGate.STOP:
             return
         if gate.gate is QueryGate.CACHED:
-            async for r in self._emit_digest(event, gate.text, note=gate.note):
+            async for r in self._emit_digest(event, gate.text, note=gate.note,
+                                             blocks=gate.blocks):
                 yield r
             return
 
         today = self._today()
-        entries = await self._store.get_entries()
         limit = self._cfg_int("no_due_expire_days", 30)
-        valid = [r for r in entries.values() if is_valid(r, today, limit)]
 
         # 顺便检测有没有新信息。走 only_new，且不插提醒（提醒下面自己插一次）
         result = await self._run_once(
@@ -206,12 +221,13 @@ class CommandsMixin:
             keep_entries=True,
         )
 
-        merged = list(valid)
-        if result["new"] > 0 and result["text"]:
-            # 新抓的那份解析成记录后并进来，避免出现两个同名分类
-            parsed = split_entries(result["text"])
-            if parsed:
-                merged = merged + to_records(parsed, [], today)
+        # ★ 从库里现读一份，不要自己把 result["text"] 拼回来：
+        #   那条路会给新抓的条目配【合成 id】，和库里的【真实 notice id】不是同一个 ——
+        #   同一条通知会在输出里出现两遍（实测第 2 次 /digest all 必然如此）。
+        #   刚抓到的那些已经 upsert 进去了（keep_entries=True）。
+        entries = await self._store.get_entries()
+        # 倒序：upsert 是往后追加，所以新的在后面；截断时该保新的而不是旧的。
+        merged = [r for r in reversed(list(entries.values())) if is_valid(r, today, limit)]
 
         # 库大了不能一次全倒出来（节点数会超上限、退回纯文本）
         cap = self._cfg_int("query_all_max_items", 40)
@@ -234,7 +250,7 @@ class CommandsMixin:
             text += (chr(10) * 2 + "（还有 " + str(dropped)
                      + " 条没列出来；调大面板里的 query_all_max_items 可以多看一些）")
         if gate.cooldown > 0:
-            self._query_cache[gate.key] = (time.monotonic(), text)
+            self._query_cache[gate.key] = (time.monotonic(), text, result.get("blocks"))
         async for r in self._emit_digest(event, text):
             yield r
 

@@ -95,8 +95,6 @@ class PipelineMixin:
         notices = await self._fetcher.fetch_notices(categories=categories) if categories else []
 
         seen = await self._store.get_seen_ids()
-        # 这一批是「检测到的新通知」，跟 fresh 不同：fresh 在全量模式下是全部
-        new_ids = [item["id"] for item in notices if item["id"] not in seen]
 
         # 首次运行：不把整站历史一次性推给用户，只记基线
         seeded = not dry_run and not seen and not await self._store.get_last_run_date()
@@ -111,7 +109,14 @@ class PipelineMixin:
         if recent_days:
             fresh = self._within_days(fresh, recent_days)
 
-        await self._fill_bodies(fresh)
+        # ★ 先挑出「这次真正会进正文的」，再补正文（少抓几个详情页）。
+        #   llm_max_items_per_cat 是喂给模型的单次上限，挑剩下的不会出现在简报里 ——
+        #   所以它们也【不能】记进 seen_ids，否则就是「没推给你、又永远不会再出现」。
+        model_feed, dropped = self._select_for_model(fresh)
+        # new_ids 的语义：这次真正呈现出去的新通知（seeded / 记账 / 通知管理员都用它）
+        new_ids = [item["id"] for item in model_feed if item["id"] not in seen]
+
+        await self._fill_bodies(model_feed)
         if not with_group_messages or not self._cfg_bool("enable_group_forward", True):
             group_messages: list[dict[str, Any]] = []
         else:
@@ -127,7 +132,7 @@ class PipelineMixin:
             self.context,
             date_str=self._today(),
             weather=await self._weather_text(),
-            notices_by_category=self._group_by_category(fresh),
+            notices_by_category=self._group_by_category(model_feed),
             group_messages=group_messages,
         )
 
@@ -151,6 +156,13 @@ class PipelineMixin:
         if group_messages:
             text = block_utils.stamp_block_refs(text, group_messages)
 
+        # 被单次上限挤掉的那些，明确说一声：它们在下一轮还会重新进 prompt、不会丢，
+        # 但用户有权知道今天看到的不全（query_all_max_items 那条路就是这么做的）。
+        if dropped and text:
+            text += (chr(10) * 2 + "（另有 " + str(dropped)
+                     + " 条这次没排上，下一轮会继续；想一次多看几条就调大面板里的"
+                     " llm_max_items_per_cat）")
+
         # 到期提醒：从库里挑"已推送过 + 快到期"的，插在头部之后、第一个分类之前。
         # 放在入库之后 —— 它读的就是刚写进去的那张表。
         due_items = (
@@ -168,14 +180,53 @@ class PipelineMixin:
             await self._store.set_last_digest(text)
             if seeded:
                 logger.info(f"[简报] 首次运行：记录 {len(notices)} 条为基线，本次不推送")
+                # 首次要记【全部】：只记进正文的那部分的话，下次会把剩下的
+                # 当成新的、整站历史一次性刷给他。
+                await self._store.add_seen_ids([item["id"] for item in notices])
             else:
                 pushed = await self._push(text, group_messages)
-            await self._store.add_seen_ids([item["id"] for item in notices])
+                if pushed:
+                    # ★ 只记「真正呈现出去的那批」。
+                    #   以前记的是抓到的全量，超上限的那些既没推给他、
+                    #   又永远不会再出现在简报里 —— 静默永久丢失。
+                    await self._store.add_seen_ids(new_ids)
+                else:
+                    # ★ 一条都没发出去（没配 push_targets / 开关关着 / 发送失败）
+                    #   就不记账，下一轮重试。以前照样记，于是持续静默丢弃。
+                    logger.warning(
+                        "[简报] 这次一条都没发出去 —— 不记 seen_ids，下一轮重试"
+                    )
             await self._store.set_last_run_date(self._today())
 
-        return self._result(text=text, new=len(fresh), pushed=pushed, seeded=seeded,
+        return self._result(text=text, new=len(model_feed), pushed=pushed, seeded=seeded,
                               blocks=group_messages,
                               new_ids=new_ids)
+
+    def _select_for_model(self, notices: list[Notice]) -> tuple[list[Notice], int]:
+        """挑出这次要喂给模型的条目，返回 (选中的, 被挤掉的条数)。
+
+        ★ 为什么「挑」必须在这里做、而不是在渲染层做：
+          挑剩下的那些【不会进正文】，因此也就不能记进 seen_ids ——
+          否则它们既没推给用户、又永远不会再出现在任何一份简报里（静默永久丢失）。
+          所以挑选必须发生在调用方能看到结果的地方。
+
+        被挤掉的那些下一轮仍然在「新的」里，会重新进 prompt，不会丢。
+        llm_max_items_per_cat 填 0 或负数表示不限。
+        """
+        limit = self._cfg_int("llm_max_items_per_cat", 8)
+        if limit <= 0:
+            return list(notices), 0
+        per_cat: dict[str, int] = {}
+        selected: list[Notice] = []
+        dropped = 0
+        for item in notices:
+            cat = str(item.get("category", "") or "")
+            if per_cat.get(cat, 0) < limit:
+                per_cat[cat] = per_cat.get(cat, 0) + 1
+                selected.append(item)
+            else:
+                dropped += 1
+        return selected, dropped
 
     async def _fill_bodies(self, notices: list[Notice]) -> None:
         """按开关给需要正文的条目补抓详情页；单条失败降级为仅标题。"""
