@@ -19,13 +19,31 @@
                 "description": "推送目标会话",
                 "type": "list",
                 "default": [],
-                "hint": "会话标识（umo），私聊和群都行：私聊形如 <平台ID>:FriendMessage:<QQ号>，群形如 <平台ID>:GroupMessage:<群号>，平台 ID 通常是 aiocqhttp。在目标会话里发 /digest register 自动写入，一般不用手填"
+                "hint": "会话标识（umo），私聊和群都行：私聊形如 <平台ID>:FriendMessage:<QQ号>，群形如 <平台ID>:GroupMessage:<群号>，平台 ID 通常是 aiocqhttp。**手填**（登记指令已取消）"
             },
             "max_digest_chars": {
                 "description": "简报最大字数",
                 "type": "int",
                 "default": 3500,
                 "hint": "超出直接截断（QQ 单条消息有长度上限）"
+            },
+            "use_forward_msg": {
+                "description": "用合并转发发送",
+                "type": "bool",
+                "default": true,
+                "hint": "开：简报发成一张可点开的「聊天记录」卡片，不刷屏（一条通知一个节点、分类处一个分隔节点）。关：直接发一长条纯文本。★ 合并转发失败会自动退回纯文本重发，所以开着不会更危险"
+            },
+            "max_forward_nodes": {
+                "description": "合并转发最多几个节点",
+                "type": "int",
+                "default": 40,
+                "hint": "节点数超过这个值就改用纯文本发送（QQ 对转发节点数有上限）"
+            },
+            "bot_uin": {
+                "description": "转发节点显示的身份 QQ 号",
+                "type": "string",
+                "default": "",
+                "hint": "合并转发里每个节点都要带一个「谁说的」，填机器人的 QQ 号头像才正常。留空则用 0，可能显示成默认头像"
             }
         }
     },
@@ -118,7 +136,7 @@
                 "description": "管理员 QQ 号（可用全部指令）",
                 "type": "list",
                 "default": [],
-                "hint": "填你自己的 QQ 号。只有列表里的 QQ 能发 /digest now、register、last 这类管理指令，其他人发什么都不回（静默）。⚠️ 留空 = 谁都不能用，不是「不设限」——默认锁死是为了防止别人装完忘配就把 /digest now 对外开放"
+                "hint": "填你自己的 QQ 号。只有列表里的 QQ 能发 /digest now、test、last 这类管理指令，其他人发什么都不回（静默）。⚠️ 留空 = 谁都不能用，不是「不设限」——默认锁死是为了防止别人装完忘配就把 /digest now 对外开放"
             },
             "command_allow_groups": {
                 "description": "开放查询的群号",

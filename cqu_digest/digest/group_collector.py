@@ -18,7 +18,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-from storage import DigestStore
+from cqu_digest.digest.storage import DigestStore
 
 TEXT_LIMIT = 300
 

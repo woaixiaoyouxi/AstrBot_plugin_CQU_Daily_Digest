@@ -34,12 +34,44 @@
 
 依赖见 `requirements.txt`（`httpx`、`beautifulsoup4`），多数 AstrBot 实例自带。
 
+## 目录结构
+
+```
+astrbot_plugin_cqu_daily_digest/
+├── main.py                  插件入口：注册 + 生命周期 + 指令分派 + 群消息监听
+├── cqu_digest/              内部包（带前缀，避免和别的插件撞顶层模块名）
+│   ├── config.py            配置读取（含把面板分组配置摊平）
+│   ├── schedule.py          定时调度、启动补推
+│   ├── pipeline.py          主流水线：抓取 -> 去重 -> 补正文 -> 群消息 -> 渲染 -> 记账
+│   ├── push.py              推送 + 合并转发（失败自动退回纯文本）
+│   ├── auth.py              两级权限（管理员 QQ / 开放群）
+│   ├── commands.py          各条指令的实现
+│   ├── fetch/               抓取侧
+│   │   ├── engine.py        抓取引擎（从 DUT_Notices 沿用）
+│   │   ├── sources.py       信息源清单：加一个源 = 加一个 dict
+│   │   ├── parsers.py       从标签里抠标题的小工具
+│   │   └── weather.py       天气
+│   └── digest/              简报侧
+│       ├── renderer.py      拼 prompt / 调模型 / 排版 / 切段
+│       ├── group_collector.py  群消息采集与缓冲
+│       └── storage.py       KV：去重基线 / 上次运行日 / 上次简报 / 群缓冲
+├── _conf_schema.json        ★ 配置面板的表单定义（必须留在根目录）
+├── metadata.yaml            ★ 插件元信息（必须留在根目录）
+├── requirements.txt
+├── README.md
+└── LICENSE
+
+`main.py` 里的 `CquDailyDigestPlugin` 由上面 6 个 mixin 拼起来
+（`ConfigMixin` / `ScheduleMixin` / `PipelineMixin` / `PushMixin` / `AuthMixin` / `CommandsMixin`），
+方法按职责分布在各模块里。想改哪一块，直接翻对应的文件。
+```
+
 ## 配置要点
 
 | 配置项 | 说明 |
 |---|---|
 | `push_time` | 每天推送时间，默认 `09:00` |
-| `push_targets` | 推送到哪。私聊和群都行：私聊形如 `<平台ID>:FriendMessage:<QQ号>`，群形如 `<平台ID>:GroupMessage:<群号>`，平台 ID 通常是 `aiocqhttp`（以你面板里的平台名为准）。**在目标会话里发 `/digest register` 自动登记**，一般不用手填 |
+| `push_targets` | 推送到哪。私聊和群都行：私聊形如 `<平台ID>:FriendMessage:<QQ号>`，群形如 `<平台ID>:GroupMessage:<群号>`，平台 ID 通常是 `aiocqhttp`（以你面板里的平台名为准）。**手填**，没有自动登记（格式：`<平台ID>:FriendMessage:<QQ号>`） |
 | `command_allow_from` | 管理员 QQ 号，可用**全部**指令。**默认是空的，即谁都不能用**——必须先填上自己的号 |
 | `command_allow_groups` | 开放查询的**群号**。名单里的群里任何人都会用 `/digest`（只能查，用不了管理指令）。**默认留空 = 群里谁都不能查** |
 | `query_cooldown_seconds` | 公开查询的冷却秒数，默认 `120`。同一个会话短时间内只现算一次，期内再来直接返回上次那份 |
@@ -55,14 +87,14 @@
 
 | | 填什么 | 能干什么 | 留空时 |
 |---|---|---|---|
-| `command_allow_from` | **QQ 号** | 全部指令，包括 `/digest now`、`register`、`last` | 谁都不能用 |
+| `command_allow_from` | **QQ 号** | 全部指令，包括 `/digest now`、`test`、`last` | 谁都不能用 |
 | `command_allow_groups` | **群号** | 群里**任何人**都能 `/digest` 现算一份看 | 群里谁都不能查 |
 
 默认锁死是刻意的：插件的默认值会跟着仓库一起公开，若写成「留空即全开」，别人装完忘了配就等于把 `/digest now` 对外敞开——那玩意会烧 API 额度、还会往群里发消息。
 
 不在任何名单里的会话发 `/digest` 时，插件**一个字都不回**，并且会 `stop_event()` 把这条消息截断——不这样做的话，消息会继续流向别的插件和 AstrBot 的 AI 对话，机器人照样会在群里冒泡。
 
-推送范围同理：`_push` 只遍历 `push_targets`，没登记过的会话一个字节都发不出去。机器人被拉进新群不会自动开口，得在那个群里发一次 `/digest register`。
+推送范围同理：`_push` 只遍历 `push_targets`，没列进去的会话一个字节都发不出去。机器人被拉进新群不会自动开口——要让它开口，得把那个群的 umo 填进 `push_targets`。
 
 ### 群里的人能查到什么
 
@@ -86,7 +118,7 @@
 | **发** | 简报推到哪些会话 | `push_targets` | 一个都不发（只写 `digest_last`） |
 
 - **只想盯某几个群** → 填 `group_allow_from`，比如 `["123456789", "987654321"]`。这是按**群号**筛；`group_keywords` 是按**内容**筛，两者可以叠加。
-- **只让简报发到某几个会话** → 用 `/digest register` 登记（或手填 `push_targets`）。
+- **只让简报发到某几个会话** → 手填 `push_targets`。
 - 收与发互不绑定：可以「收 3 个群的消息，只发到 1 个私聊」，这是默认推荐的用法。
 
 > 注意「收」还隔着一层平台：机器人得**已经被拉进那个群、且 aiocqhttp 能收到该群消息**（群没禁言），插件这边才谈得上收。`group_allow_from` 是在「已经收得到」的前提下再筛一层。
@@ -115,7 +147,7 @@ AstrBot 面板 →「插件」→ 每日简报 →「配置」。每一项都有
 | 允许哪些 QQ 用指令 | 「安全」→ `command_allow_from`，是一个 JSON 数组，如 `["你的QQ号"]` |
 | 开放哪些群来查 | 「安全」→ `command_allow_groups`，填**群号**数组，如 `["123456789"]`；留空 = 群里谁都不能查 |
 | 查询限频 | 「安全」→ `query_cooldown_seconds`，默认 `120` 秒 |
-| 推到哪些会话 | 「推送」→ `push_targets`（一般用 `/digest register` 自动写，不用手填） |
+| 推到哪些会话 | 「推送」→ `push_targets`，手填：私聊 `<平台ID>:FriendMessage:<QQ号>`，群 `<平台ID>:GroupMessage:<群号>` |
 | 只采集哪些群 | 「群消息」→ `group_allow_from`，JSON 数组填群号，如 `["123456789"]`；留空 = 全抓 |
 | 群消息按内容筛 | 「群消息」→ `group_keywords`，留空 = 全要 |
 | 换简报用的模型 | 「大模型」→ `llm_provider`，留空即跟随全局默认 |
@@ -126,11 +158,11 @@ AstrBot 面板 →「插件」→ 每日简报 →「配置」。每一项都有
 
 ### 3. 改抓取源
 
-`sources.py` 里的 `SOURCES` 才是数据来源，加源方法见下一节。这个改的是插件源码，改完同样要重载。
+`cqu_digest/fetch/sources.py` 里的 `SOURCES` 才是数据来源，加源方法见下一节。这个改的是插件源码，改完同样要重载。
 
 ### 4. 改「摘什么」的判断标准
 
-「哪些算跟学生相关」写在 `digester.py` 顶部的 `SYSTEM_PROMPT` 里，是一段给模型看的自然语言。想调整保留/丢弃的范围，改这段文字即可，不用动代码逻辑。
+「哪些算跟学生相关」写在 `cqu_digest/digest/renderer.py` 顶部的 `SYSTEM_PROMPT` 里，是一段给模型看的自然语言。想调整保留/丢弃的范围，改这段文字即可，不用动代码逻辑。
 
 改提示词时留个心眼：里面「固定五行、一行都不能少」这类**格式硬要求不要动**。曾经因为同时写了「每条最多 4 行」和「五行格式」两句自相矛盾的话，模型就会自作主张把「时间」「地点」两行省掉。改完记得用 `/digest test` 看一眼输出是否还有「时间：」「地点：」两行。
 
@@ -155,15 +187,12 @@ AstrBot 面板 →「插件」→ 每日简报 →「配置」。每一项都有
 | `/digest test` | 看完整简报（含群消息）长什么样，不推送、不写去重 | 管理员 |
 | `/digest last` | 查看最近一次推送的原文 | 管理员 |
 | `/digest sources` | 查看信息源配置状态 | 管理员 |
-| `/digest register` | 把当前会话登记为推送目标 | 管理员 |
-| `/digest unregister` | 取消当前会话的登记 | 管理员 |
-| `/digest targets` | 列出全部推送目标 | 管理员 |
 
 「管理员」= `command_allow_from` 里的 QQ；「开放群」= `command_allow_groups` 里的群。两个名单之外的会话，发什么都是静默。
 
 ## 加一个信息源
 
-编辑 `sources.py`，往 `SOURCES` 里加一个 dict：
+编辑 `cqu_digest/fetch/sources.py`，往 `SOURCES` 里加一个 dict：
 
 ```python
 {

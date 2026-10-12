@@ -18,8 +18,8 @@ from typing import Any
 
 from astrbot.api import logger
 
-from fetcher import CHINA_TZ, Notice
-from sources import category_title
+from cqu_digest.fetch.engine import CHINA_TZ, Notice
+from cqu_digest.fetch.sources import category_title
 
 CATEGORY_ORDER = ("campus", "competition")
 
@@ -28,6 +28,17 @@ SECTION_GAP = "\n\n\n\n"
 
 _HEADER_RE = re.compile(r"^【[^】]+】$")
 """分类小标题的识别式，如「【校内通知】」。模型排版不可控，靠这个重新拼。"""
+
+
+def item_title(line: str) -> str:
+    """「1. 关于XXX的通知」-> 「关于XXX的通知」；不是条目就返回空串。
+
+    刻意用字符串切分而不是正则：正则里的反斜杠很容易在别处被转义吃掉。
+    """
+    head, dot, rest = line.strip().partition(". ")
+    if dot and head.isdigit():
+        return rest.strip()
+    return ""
 
 SYSTEM_PROMPT = """你在为一名重庆大学计算机学院的本科生整理「每日简报」。
 
@@ -223,6 +234,57 @@ class Digester:
 
         rendered = ["\n".join(block).strip("\n") for block in blocks]
         return SECTION_GAP.join(rendered)
+
+    # ── 合并转发用的切段 ────────────────────────────────────────
+
+    SEP_LINE = "─" * 14
+    HEAD_NAME = "每日简报"
+
+    @classmethod
+    def split_segments(cls, text: str) -> list[tuple[str, str]]:
+        """把简报切成 [(节点名, 内容), ...]，给合并转发用。
+
+        规则跟排版保持一致：
+          · 第一个【分类】行之前 = 头部（日期 + 天气）-> 一个节点
+          · 每个【分类】行 -> 一个分隔节点，节点名就是分类名
+          · 每个「N. 标题」开头的条目 -> 一个节点，节点名 = 该条标题
+        """
+        lines = text.split(chr(10))
+        segs: list[tuple[str, str]] = []
+        head: list[str] = []
+        i = 0
+        while i < len(lines) and not _HEADER_RE.match(lines[i].strip()):
+            head.append(lines[i])
+            i += 1
+        segs.append((cls.HEAD_NAME, chr(10).join(head).strip() or cls.HEAD_NAME))
+
+        name: str | None = None
+        body: list[str] = []
+
+        def flush() -> None:
+            if name is None:
+                return
+            blob = chr(10).join(body).strip()
+            if blob:
+                segs.append((name, blob))
+
+        while i < len(lines):
+            s = lines[i].strip()
+            if _HEADER_RE.match(s):
+                flush()
+                name, body = s, [cls.SEP_LINE]
+            else:
+                title = item_title(s)
+                if title:
+                    flush()
+                    name, body = title, [s]
+                else:
+                    if name is None:
+                        name, body = cls.HEAD_NAME, []
+                    body.append(lines[i])
+            i += 1
+        flush()
+        return segs
 
     # ── 降级渲染 ────────────────────────────────────────────────
 

@@ -23,7 +23,7 @@ from typing import TypedDict
 
 from bs4 import Tag
 
-from parsers import child_text, parse_text_content, parse_title_attr
+from cqu_digest.fetch.parsers import child_text, parse_text_content, parse_title_attr
 
 Parser = Callable[[Tag], str]
 

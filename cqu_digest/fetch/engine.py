@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup, Tag
 
 from astrbot.api import logger
 
-from sources import SOURCES, SourceConfig
+from cqu_digest.fetch.sources import SOURCES, SourceConfig
 
 CHINA_TZ = timezone(timedelta(hours=8))
 
