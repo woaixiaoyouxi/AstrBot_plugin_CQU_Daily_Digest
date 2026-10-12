@@ -66,6 +66,15 @@ class CommandsMixin:
             return
 
         text = result["text"]
+
+        # 群友这次查到了新通知 -> 也给管理员发一份（提示 + 同一份卡片）
+        if result["new"] > 0:
+            ok_admin = await self._notify_admin_new(
+                event, text, result.get("blocks"))
+            if ok_admin:
+                # 确实送到他手上了 -> 记进 seen_ids，免得定时推送再推一遍
+                await self._store.add_seen_ids(result.get("new_ids") or [])
+
         if cooldown > 0:
             self._query_cache[key] = (time.monotonic(), text)
         async for r in self._emit_digest(event, text, blocks=result.get("blocks")):

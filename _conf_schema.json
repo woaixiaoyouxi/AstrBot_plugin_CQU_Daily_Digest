@@ -156,6 +156,12 @@
                 "default": 30,
                 "hint": "列表页本来就只挂最近几周的条目，30 天基本等于全量。调小 = 更短更快，调大 = 更全但更长"
             },
+            "query_notify_admin": {
+                "description": "群友查到新通知时通知我",
+                "type": "bool",
+                "default": true,
+                "hint": "开：群友发 /digest 查到新通知时，给 command_allow_from 里的管理员私聊发一句「群友查到新的消息了！」再附上同一份卡片。发成功后那条会记进去重基线，定时推送不会再推它一遍；发失败就不记，留给定时补"
+            },
             "query_cooldown_seconds": {
                 "description": "查询冷却（秒）",
                 "type": "int",

@@ -24,10 +24,12 @@ class PipelineMixin:
         seeded: bool = False,
         skipped: bool = False,
         blocks: list | None = None,
+        new_ids: list | None = None,
     ) -> dict[str, Any]:
-        """统一返回值形状——调用方固定读这五个键，别各写各的 dict。"""
+        """统一返回值形状——调用方固定读这几个键，别各写各的 dict。"""
         return {"text": text, "new": new, "pushed": pushed, "seeded": seeded,
-                "skipped": skipped, "blocks": blocks or []}
+                "skipped": skipped, "blocks": blocks or [],
+                "new_ids": new_ids or []}
 
     def _queue_ahead(self) -> int:
         """我前面还有几个在跑/在等（0 = 轮子空着，直接能跑）。"""
@@ -83,14 +85,18 @@ class PipelineMixin:
 
         keep_entries：dry_run 也【写条目库】。查询（/digest、/digest all）走这条 ——
         它确实「见过」这些通知，存下来 /digest all 才更全。
-        ★ 但它【绝不写 seen_ids】：群友查一次就记成「已推送」的话，
+        ★ 这条路径【本身】不写 seen_ids：群友查一次就记成「已推送」的话，
           以后真推送会把那条当旧的跳过 —— 你反而收不到它。
+          例外：/digest 通知管理员成功之后，调用方会自己补写一次
+          （那条确实送到他手上了，不写的话定时推送会再推一遍）。
         test 不传这个（它要全程不过库）。
         """
         categories = self._enabled_categories()
         notices = await self._fetcher.fetch_notices(categories=categories) if categories else []
 
         seen = await self._store.get_seen_ids()
+        # 这一批是「检测到的新通知」，跟 fresh 不同：fresh 在全量模式下是全部
+        new_ids = [item["id"] for item in notices if item["id"] not in seen]
 
         # 首次运行：不把整站历史一次性推给用户，只记基线
         seeded = not dry_run and not seen and not await self._store.get_last_run_date()
@@ -168,7 +174,8 @@ class PipelineMixin:
             await self._store.set_last_run_date(self._today())
 
         return self._result(text=text, new=len(fresh), pushed=pushed, seeded=seeded,
-                              blocks=group_messages)
+                              blocks=group_messages,
+                              new_ids=new_ids)
 
     async def _fill_bodies(self, notices: list[Notice]) -> None:
         """按开关给需要正文的条目补抓详情页；单条失败降级为仅标题。"""

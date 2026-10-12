@@ -173,6 +173,43 @@ class PushMixin:
             inner = [Node(content=[Plain("（空）")], name="群消息", uin=uin)]
         return Node(content=[Plain("群消息原文")] + inner, name="群消息原文", uin=uin)
 
+    async def _notify_admin_new(self, event: Any, text: str,
+                                blocks: list | None = None) -> bool:
+        """群友查到新通知 -> 给管理员私聊发一句提示 + 同一份卡片。
+
+        返回"有没有至少一个管理员真的收到了"。调用方拿它决定要不要写 seen_ids：
+        收到了才写（不然定时推送会再推一次），没收到就不写（留给定时补）。
+        """
+        if not self._cfg_bool("query_notify_admin", True):
+            return False
+        admins = [str(x).strip() for x in self._cfg_list("command_allow_from", [])
+                  if str(x).strip()]
+        if not admins:
+            return False
+
+        # 平台 ID 从触发它的那条 event 的 umo 里取（aiocqhttp:GroupMessage:群号）
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        platform = umo.split(":", 1)[0] if ":" in umo else ""
+        if not platform:
+            logger.warning("[简报] 拿不到平台 ID，群友查到新通知时没法通知管理员")
+            return False
+
+        delivered = False
+        for qq in admins:
+            target = platform + ":FriendMessage:" + qq
+            if target == umo:
+                continue                    # 就是他自己在查，不用再通知一遍
+            try:
+                await self.context.send_message(
+                    target, MessageChain().message(ZWSP + "群友查到新的消息了！" + ZWSP)
+                )
+            except Exception as exc:                            # noqa: BLE001
+                logger.warning(f"[简报] 通知管理员 {qq} 失败：{exc}")
+                continue
+            if await self._send_one(target, text, blocks):
+                delivered = True
+        return delivered
+
     async def _emit_digest(self, event: AstrMessageEvent, text: str, note: str = "",
                           blocks: list | None = None):
         """把简报正文以合并转发卡片回给当前会话；不行就退回纯文本。
