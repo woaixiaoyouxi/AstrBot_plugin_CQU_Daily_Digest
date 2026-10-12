@@ -1,6 +1,7 @@
 """主流水线：抓取 -> 去重 -> 补正文 -> 群消息 -> 交给渲染 -> 记账。"""
 import asyncio
 import time
+from hashlib import sha1
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -8,6 +9,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.fetch.engine import CHINA_TZ, Notice
 from cqu_digest.fetch.sources import SOURCES_BY_KEY
+from cqu_digest.digest.entries import days_between, split_entries
 
 BODY_FETCH_CONCURRENCY = 5
 
@@ -21,9 +23,11 @@ class PipelineMixin:
         pushed: bool = False,
         seeded: bool = False,
         skipped: bool = False,
+        blocks: list | None = None,
     ) -> dict[str, Any]:
         """统一返回值形状——调用方固定读这五个键，别各写各的 dict。"""
-        return {"text": text, "new": new, "pushed": pushed, "seeded": seeded, "skipped": skipped}
+        return {"text": text, "new": new, "pushed": pushed, "seeded": seeded,
+                "skipped": skipped, "blocks": blocks or []}
 
     async def _run_once(
         self,
@@ -31,6 +35,8 @@ class PipelineMixin:
         dry_run: bool = False,
         recent_days: int | None = None,
         with_group_messages: bool = True,
+        only_new: bool = False,
+        with_deadline_alert: bool = True,
     ) -> dict[str, Any]:
         """跑一次完整流程。
 
@@ -45,6 +51,8 @@ class PipelineMixin:
                 dry_run=dry_run,
                 recent_days=recent_days,
                 with_group_messages=with_group_messages,
+                only_new=only_new,
+                with_deadline_alert=with_deadline_alert,
             )
 
     async def _run_pipeline(
@@ -53,16 +61,28 @@ class PipelineMixin:
         dry_run: bool = False,
         recent_days: int | None = None,
         with_group_messages: bool = True,
+        only_new: bool = False,
+        with_deadline_alert: bool = True,
     ) -> dict[str, Any]:
-        """跑一次完整流程。dry_run 不推送、不写 seen_ids（调试源 / 公开查询用）。"""
+        """跑一次完整流程。dry_run 不推送、不写 seen_ids（调试源 / 公开查询用）。
+
+        only_new：只取不在 seen_ids 里的（增量）。查询走这条——
+        有新才值得生成，没有的话调用方直接回一句「新增 0 条」就行。
+
+        with_deadline_alert：要不要插【即将截止】那一段。
+        test 传 False（它要全程不过库，而提醒是读库来的）。
+        """
         categories = self._enabled_categories()
         notices = await self._fetcher.fetch_notices(categories=categories) if categories else []
 
         seen = await self._store.get_seen_ids()
+
         # 首次运行：不把整站历史一次性推给用户，只记基线
         seeded = not dry_run and not seen and not await self._store.get_last_run_date()
 
-        if dry_run or seeded:
+        if only_new:
+            fresh = [item for item in notices if item["id"] not in seen]
+        elif dry_run or seeded:
             fresh = list(notices)
         else:
             fresh = [item for item in notices if item["id"] not in seen]
@@ -71,14 +91,16 @@ class PipelineMixin:
             fresh = self._within_days(fresh, recent_days)
 
         await self._fill_bodies(fresh)
-        if not with_group_messages:
+        if not with_group_messages or not self._cfg_bool("enable_group_forward", True):
             group_messages: list[dict[str, Any]] = []
         else:
-            group_messages = (
-                await self._collector.peek_recent()
+            raw_blocks = (
+                await self._collector.blocks()
                 if dry_run
-                else await self._collector.consume_recent()
+                else await self._collector.consume_blocks()
             )
+            # 被"结"关掉的块不进简报
+            group_messages = [b for b in raw_blocks if not b.get("closed")]
 
         text = await self._digester.build(
             self.context,
@@ -88,17 +110,50 @@ class PipelineMixin:
             group_messages=group_messages,
         )
 
+        # 解析入库。只有【真跑】才写库 —— 库的语义是"已推送给他的账本"，
+        # 所以 /digest 和 test（都是 dry_run）一个字都不写。
+        if not dry_run and text:
+            parsed = split_entries(text)
+            if parsed:
+                added = await self._store.upsert_entries(
+                    self._to_records(parsed, notices, self._today()), self._today()
+                )
+                if added:
+                    logger.info(f"[简报] 条目库新增 {added} 条")
+            removed = await self._store.prune_entries(
+                self._today(), self._cfg_int("no_due_expire_days", 30)
+            )
+            if removed:
+                logger.info(f"[简报] 条目库清理 {removed} 条过期记录")
+
+        # 群消息的「块号：N」换成占位符。放在入库之后 —— 入库时要靠那行配对。
+        if group_messages:
+            text = self._digester.stamp_block_refs(text, group_messages)
+
+        # 到期提醒：从库里挑"已推送过 + 快到期"的，插在头部之后、第一个分类之前。
+        # 放在入库之后 —— 它读的就是刚写进去的那张表。
+        due_items = (
+            await self._due_soon_items(self._today())
+            if with_deadline_alert else []
+        )
+        if due_items:
+            text = self._digester.insert_section(
+                text, self._digester.render_due_soon(due_items)
+            )
+            logger.info(f"[简报] 即将截止 {len(due_items)} 条")
+
         pushed = False
         if not dry_run:
             await self._store.set_last_digest(text)
             if seeded:
                 logger.info(f"[简报] 首次运行：记录 {len(notices)} 条为基线，本次不推送")
             else:
-                pushed = await self._push(text)
+                pushed = await self._push(text, group_messages)
             await self._store.add_seen_ids([item["id"] for item in notices])
             await self._store.set_last_run_date(self._today())
 
-        return self._result(text=text, new=len(fresh), pushed=pushed, seeded=seeded)
+        return self._result(text=text, new=len(fresh), pushed=pushed, seeded=seeded,
+                              blocks=group_messages)
 
     async def _fill_bodies(self, notices: list[Notice]) -> None:
         """按开关给需要正文的条目补抓详情页；单条失败降级为仅标题。"""
@@ -151,6 +206,103 @@ class PipelineMixin:
         for item in notices:
             grouped.setdefault(item["category"], []).append(item)
         return grouped
+
+    async def _due_soon_items(self, today: str) -> list:
+        """从条目库里挑出【即将截止】的条目。
+
+        条件：① 已经推送过（id 在 seen_ids 里）
+              ② 0 <= (截止日 - 今天) <= deadline_alert_days（默认 7）
+        只认截止日，活动日不算 —— 提醒的是"别错过截止"。
+        按剩余天数升序（最急的在前）。
+        """
+        if not self._cfg_bool("deadline_alert_enabled", True):
+            return []
+        limit = self._cfg_int("deadline_alert_days", 7)
+        seen = await self._store.get_seen_ids()
+        entries = await self._store.get_entries()
+        items = []
+        for rid, rec in entries.items():
+            if rid not in seen:
+                continue
+            due = str(rec.get("due", "") or "")
+            if not due:
+                continue
+            left = days_between(today, due)
+            if left is None or left < 0 or left > limit:
+                continue
+            note = ""
+            for slot in rec.get("times") or []:
+                if str(slot.get("date", "")) == due:
+                    note = str(slot.get("note", "") or "")
+                    break
+            items.append({
+                "title": str(rec.get("title", "") or ""),
+                "due": due,
+                "note": note,
+                "link": str(rec.get("link", "") or ""),
+                "days_left": left,
+            })
+        items.sort(key=lambda x: x["days_left"])
+        return items
+
+    @staticmethod
+    def _to_records(parsed: list, notices: list[Notice], today: str) -> list:
+        """给解析出来的条目配上 id 和发布时间，成为可入库的记录。
+
+        id 从强到弱：① 链接对得上某条抓取结果 -> 用它的 id 和 published_at
+                     ② 对不上（群消息那条）-> 分类+标题 算一个稳定哈希
+        标题匹配带一层"互相包含"兜底，因为模型可能微调标题措辞。
+        """
+        by_link = {}
+        by_title = {}
+        for item in notices:
+            link = str(item.get("link", "") or "").strip()
+            if link:
+                by_link[link] = item
+            title = str(item.get("title", "") or "").strip()
+            if title:
+                by_title.setdefault(title, item)
+
+        out = []
+        for entry in parsed:
+            if not isinstance(entry, dict):
+                continue
+            fields = entry.get("fields") or {}
+            link = str(fields.get("链接", "") or "").strip()
+            title = str(entry.get("title", "") or "").strip()
+            hit = by_link.get(link) if link else None
+            if hit is None and title:
+                hit = by_title.get(title)
+                if hit is None:
+                    for key, item in by_title.items():
+                        if key and (key in title or title in key):
+                            hit = item
+                            break
+            if hit is not None:
+                rid = str(hit.get("id", "") or "")
+                published = hit.get("published_at")
+                if hasattr(published, "strftime"):
+                    published = published.strftime("%Y-%m-%d")
+                else:
+                    published = today
+            else:
+                seed = str(entry.get("cat", "")) + "|" + title
+                rid = "e" + sha1(seed.encode("utf-8")).hexdigest()[:16]
+                published = today
+            if not rid:
+                continue
+            out.append({
+                "id": rid,
+                "cat": str(entry.get("cat", "") or ""),
+                "title": title,
+                "fields": fields,
+                "times": entry.get("times") or [],
+                "link": link,
+                "time": str(entry.get("time", "") or ""),
+                "due": str(entry.get("due", "") or ""),
+                "published": published,
+            })
+        return out
 
     async def _weather_text(self) -> str:
         if not self._cfg_bool("weather_enabled", True):

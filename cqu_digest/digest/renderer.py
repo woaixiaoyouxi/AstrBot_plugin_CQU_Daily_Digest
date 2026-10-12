@@ -20,22 +20,42 @@ from astrbot.api import logger
 
 from cqu_digest.fetch.engine import CHINA_TZ, Notice
 from cqu_digest.fetch.sources import category_title
+from cqu_digest.digest.entries import short_date
 
 CATEGORY_ORDER = ("campus", "competition")
 
 SECTION_GAP = "\n\n\n\n"
 """分类之间的空行——换行符+3 个空行。"""
 
+SEP_LINE = "——————————"
+"""分类标题下面那条分割线。由脚本统一插，不指望模型排版。"""
+
+PREFERRED_CATEGORIES = ("【校内通知】", "【竞赛】", "【群消息转发】")
+"""拼库里的条目时的分类顺序。清单里没有的分类按出现顺序排在后面。"""
+
+BLOCK_REF_PREFIX = "块号："
+"""模型每条群消息转发条目的第一行，写它对应的块编号。"""
+
+BLOCK_HEAD = "{{BLOCK:"
+BLOCK_TAIL = "}}"
+"""占位符。stamp 时写进去，发送前展开成内嵌卡片或原文。"""
+
 _HEADER_RE = re.compile(r"^【[^】]+】$")
 """分类小标题的识别式，如「【校内通知】」。模型排版不可控，靠这个重新拼。"""
 
 
 def item_title(line: str) -> str:
-    """「1. 关于XXX的通知」-> 「关于XXX的通知」；不是条目就返回空串。
+    """认出"这是一个条目的开头"，返回它的标题；不是条目就返回空串。
 
+    新格式是 [标题]（半角方括号包住整行）；旧的 "1. 标题" 也留着兼容。
     刻意用字符串切分而不是正则：正则里的反斜杠很容易在别处被转义吃掉。
     """
-    head, dot, rest = line.strip().partition(". ")
+    s = line.strip()
+    if s.startswith("[") and s.endswith("]") and 2 < len(s) <= 80:
+        inner = s[1:-1].strip()
+        if inner and "：" not in inner and ":" not in inner:
+            return inner
+    head, dot, rest = s.partition(". ")
     if dot and head.isdigit():
         return rest.strip()
     return ""
@@ -55,30 +75,57 @@ SYSTEM_PROMPT = """你在为一名重庆大学计算机学院的本科生整理�
 - 某个分类被筛空，就不要写那个分类的小标题。
 
 硬性要求：
-- 只依据用户提供的文本，禁止编造任何信息。原文没写的，一律写「未提及」。
+- 只依据用户提供的文本，禁止编造任何信息。原文里没有的字段，整行省略——不要写「未提及」，更不要自己推测填一个。
 - 完全按给定的分类分组，不要新增、合并或改名分类。
 - 每个分类前面单独占一行写分类名，用【】括起来，只能是这三个：
-  【校内通知】、【竞赛】、【群消息】。分类之间不要自己加空行——
+  【校内通知】、【竞赛】、【群消息转发】。分类之间不要自己加空行——
   空行由程序统一排版，你只管写内容和分类名。
 - 全中文，纯文本，不要 Markdown 标记（不要 #、*、-、`）。
 - 每行只写一件事，不要展开成长段落。
 - 不要写开场白、结语、总结或任何评论。直接输出条目。
 - 如果筛完之后一条都不剩，就只输出这一行：今日无与学生相关的新通知。
 
-每个条目的格式（校内通知 / 竞赛），**固定五行，一行都不能少**：
-标题
-时间：xxx
+每个条目的格式（校内通知 / 竞赛），按下面这个顺序和写法来：
+
+[标题]
+内容简述：xxx
+时间：26/07/01（备注）
 地点：xxx
-要求：xxx
 链接：xxx
+要求：xxx
+能获得什么：xxx
 
-找不到的字段写「未提及」，但那一行必须照写——不许省略、不许留空、
-不许把两行并成一行。哪怕原文完全没提时间地点，也要写
-「时间：未提及」「地点：未提及」。
+写法规则：
+- 标题单独占一行，用半角方括号包住整行，例如 [关于举办数学建模竞赛的通知]。
+  不要编号，不要加粗符号。
+- 「内容简述」一句话说清这是什么、面向谁。
+- 时间写成【两位年/两位月/两位日】，例如 26/07/01；括号里补一句这是哪个环节
+  （报名截止 / 初赛 / 决赛 …）。涉及多个时间就写多行，每行的「时间」后面
+  紧跟一行「地点」，一一配套，例如：
+      时间：26/07/01（报名截止）
+      地点：线上
+      时间：26/07/15（决赛）
+      地点：A区理科楼
+- 「要求」和「能获得什么」：原文写了就照写。
+- 原文里没有的字段，【整行省略】——不要写「未提及」，不要留空行占位，
+  更【绝对不要自己推测或补充】。宁可少一行，也不要编。
+  （「能获得什么」也一样：原文没写就不写这一行。）
+- 条目之间空一行。
 
-群消息的格式（固定三行）：
-群号：xxx　发布者：xxx
-内容：xxx（一句话概括，保留原始链接若有）
+群消息的处理（和上面两类不一样，仔细看）：
+- 输入里的群消息是按【块】给的，一块就是一条完整通知
+  （可能是 消息1 + 消息2 + 图片 拼起来的一条）。
+- 先判断每一块【是不是一条通知】：
+    是   = 有人发布的、面向群成员的、带具体信息的通知（活动、竞赛、事务、提醒）
+    不是 = 闲聊、表情、回应别人的话、与群主题无关的内容
+  拿不准的时候当作【不是】——群聊里宁可不转，也别把闲聊放进简报。
+- 只有判断【是通知】的块，才写进【群消息转发】分类，格式和上面两类完全一样
+  （[标题] / 内容简述 / 时间 / 地点 / 链接 / 要求 / 能获得什么）。
+- 【每条的第一行】必须是「块号：N」，N 就是输入里那个块的编号。
+  这一行程序要拿来做配对，照填即可，不要改格式、不要漏、不要挪位置。
+- 判断【不是通知】的块，一个字都不要写。
+- 【群消息转发】里不要写群号、发布者、图片链接——原文由程序原样附在你写的那条下面，
+  你只管把内容改写成上面那个格式。
 
 链接一律照抄，不要改动。"""
 
@@ -187,13 +234,20 @@ class Digester:
             blocks.append("\n".join(lines))
 
         if group_messages:
-            lines = ["## 群消息"]
-            for index, message in enumerate(group_messages[:limit * 2], 1):
-                lines.append(
-                    f"{index}. 群号：{message.get('gid', '')} "
-                    f"| 发布者：{message.get('sender', '')} "
-                    f"| 内容：{message.get('text', '')}"
-                )
+            lines = ["## 群消息（按块给：一块是一条完整通知，可能是 消息1+消息2+图片）"]
+            for index, block in enumerate(group_messages[:limit], 1):
+                lines.append(f"【块{index}】")
+                for message in block.get("items") or []:
+                    pics = message.get("images") or []
+                    who = message.get("sender_name") or message.get("sender", "")
+                    line = (
+                        f"  群号：{message.get('gid', '')} "
+                        f"| 发布者：{who} "
+                        f"| 内容：{message.get('text', '') or '（无文字）'}"
+                    )
+                    if pics:
+                        line += " | 图片：" + " ".join(str(p) for p in pics)
+                    lines.append(line)
             blocks.append("\n".join(lines))
 
         return "\n\n".join(blocks)
@@ -232,7 +286,13 @@ class Digester:
         if len(blocks) <= 1:
             return text.strip()
 
-        rendered = ["\n".join(block).strip("\n") for block in blocks]
+        rendered = []
+        for block in blocks:
+            text_block = chr(10).join(block).strip(chr(10))
+            lines = text_block.split(chr(10))
+            if lines and _HEADER_RE.match(lines[0].strip()):
+                lines.insert(1, SEP_LINE)
+            rendered.append(chr(10).join(lines))
         return SECTION_GAP.join(rendered)
 
     # ── 合并转发用的切段 ────────────────────────────────────────
@@ -265,14 +325,16 @@ class Digester:
             if name is None:
                 return
             blob = chr(10).join(body).strip()
-            if blob:
-                segs.append((name, blob))
+            # 分类节点即使正文为空也要留着：分割线是排版统一插的，
+            # 模型万一没写，也不该把整个分类弄丢
+            if blob or _HEADER_RE.match(name):
+                segs.append((name, blob or name))
 
         while i < len(lines):
             s = lines[i].strip()
             if _HEADER_RE.match(s):
                 flush()
-                name, body = s, [cls.SEP_LINE]
+                name, body = s, []
             else:
                 title = item_title(s)
                 if title:
@@ -285,6 +347,207 @@ class Digester:
             i += 1
         flush()
         return segs
+
+    # ── 复用旧简报时的头部处理 ──────────────────────────────────
+
+    @classmethod
+    def header(cls, date_str: str, weather: str) -> str:
+        """简报头部（日期 + 天气）。"""
+        return cls._header(date_str, weather)
+
+    @staticmethod
+    def replace_header(text: str, new_header: str) -> str:
+        """把简报的头部换成新的（第一个【分类】之前的那几行）。
+
+        没有新通知时复用上次那份公开简报，但日期和天气必须是今天的，
+        否则群友会看到昨天的日期。
+        """
+        lines = text.split(chr(10))
+        for i, ln in enumerate(lines):
+            if _HEADER_RE.match(ln.strip()):
+                return new_header + chr(10) * 2 + chr(10).join(lines[i:]).strip()
+        return new_header + chr(10) * 2 + text.strip()
+
+    @staticmethod
+    def render_due_soon(items: list) -> str:
+        """渲染【即将截止】分类。items 是 [{title, due, note, link, days_left}]。"""
+        if not items:
+            return ""
+        blocks = ["【即将截止】", SEP_LINE]
+        for item in items:
+            days = item.get("days_left")
+            when = "今天最后一天" if days == 0 else "还有 " + str(days) + " 天"
+            note = str(item.get("note", "") or "").strip() or "截止"
+            blocks.append("[" + str(item.get("title", "")) + "]")
+            blocks.append(
+                "时间：" + short_date(str(item.get("due", "")))
+                + "（" + note + "）—— " + when
+            )
+            if item.get("link"):
+                blocks.append("链接：" + str(item["link"]))
+            blocks.append("")
+        return chr(10).join(blocks).rstrip()
+
+    @staticmethod
+    def insert_section(text: str, section: str) -> str:
+        """把一段内容插到第一个【分类】之前（也就是头部之后）。
+
+        【每日简报】那行后面还跟着日期，匹配不上 _HEADER_RE，
+        所以"第一个匹配的行"就是第一个真分类。
+        """
+        if not section:
+            return text
+        lines = text.split(chr(10))
+        for i, line in enumerate(lines):
+            if _HEADER_RE.match(line.strip()):
+                head = chr(10).join(lines[:i]).rstrip()
+                tail = chr(10).join(lines[i:]).strip()
+                return head + chr(10) * 2 + section.strip() + chr(10) * 2 + tail
+        return text.rstrip() + chr(10) * 2 + section.strip()
+
+    @classmethod
+    def render_from_entries(cls, records: list) -> str:
+        """直接把条目记录拼成简报正文（不调模型）。
+
+        /digest all 用它：库里的东西本来就是结构化的，重新拼一遍就行 ——
+        这正是"让模型输出统一格式"换来的好处。
+        """
+        if not records:
+            return ""
+        grouped: dict[str, list] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            grouped.setdefault(str(record.get("cat", "") or ""), []).append(record)
+
+        order = [c for c in PREFERRED_CATEGORIES if c in grouped]
+        for cat in grouped:
+            if cat not in order:
+                order.append(cat)
+
+        blocks = []
+        for cat in order:
+            items = grouped.get(cat) or []
+            if not items:
+                continue
+            lines = [cat, SEP_LINE] if cat else [SEP_LINE]
+            for record in items:
+                lines.append(cls.entry_block_text(record))
+                lines.append("")
+            blocks.append(chr(10).join(lines).rstrip())
+        return (chr(10) * 3).join(blocks)
+
+    @staticmethod
+    def entry_block_text(record: dict) -> str:
+        """一条记录拼回六件套（和模型输出的格式完全一致）。"""
+        lines = ["[" + str(record.get("title", "")) + "]"]
+        fields = record.get("fields") or {}
+        brief = fields.get("内容简述")
+        if brief:
+            lines.append("内容简述：" + str(brief))
+        for slot in record.get("times") or []:
+            if not isinstance(slot, dict):
+                continue
+            iso = str(slot.get("date", "") or "")
+            raw = short_date(iso) if iso else str(slot.get("raw", "") or "")
+            if not raw:
+                continue
+            note = str(slot.get("note", "") or "")
+            lines.append("时间：" + raw + (("（" + note + "）") if note else ""))
+            place = str(slot.get("place", "") or "")
+            if place:
+                lines.append("地点：" + place)
+        for name in ("链接", "要求", "能获得什么"):
+            value = fields.get(name)
+            if value:
+                lines.append(name + "：" + str(value))
+        return chr(10).join(lines)
+
+    # ── 群消息块占位符 ──────────────────────────────────────────
+
+    @staticmethod
+    def stamp_block_refs(text: str, blocks: list) -> str:
+        """把每条里的「块号：N」整行换成占位符 {{BLOCK:N}}。
+
+        N 越界或不是数字就整行丢掉（模型偶尔会编一个不存在的块号）。
+        """
+        if not text:
+            return text
+        total = len(blocks or [])
+        out = []
+        for line in text.split(chr(10)):
+            s = line.strip()
+            if not s.startswith(BLOCK_REF_PREFIX):
+                out.append(line)
+                continue
+            raw = s[len(BLOCK_REF_PREFIX):].strip()
+            if raw.isdigit() and 1 <= int(raw) <= total:
+                indent = line[:len(line) - len(line.lstrip())]
+                out.append(indent + BLOCK_HEAD + raw + BLOCK_TAIL)
+        return chr(10).join(out)
+
+    @staticmethod
+    def block_ref_of(line: str):
+        """从一行里认出 {{BLOCK:N}}，返回 N（1 起）；不是占位符返回 None。"""
+        s = (line or "").strip()
+        if not (s.startswith(BLOCK_HEAD) and s.endswith(BLOCK_TAIL)):
+            return None
+        mid = s[len(BLOCK_HEAD):-len(BLOCK_TAIL)]
+        return int(mid) if mid.isdigit() else None
+
+    @classmethod
+    def expand_block_text(cls, text: str, blocks: list) -> str:
+        """纯文本路径：把占位符整行换成原文。
+
+        展开不出来（没块了、编号越界）就丢掉那一行，不留占位符字样。
+        """
+        if not text:
+            return text
+        if BLOCK_HEAD not in text:
+            return text
+        out = []
+        for line in text.split(chr(10)):
+            block_no = cls.block_ref_of(line)
+            if block_no is None:
+                out.append(line)
+                continue
+            plain = cls.block_plain_text(blocks, block_no)
+            if plain:
+                out.append(plain)
+        return chr(10).join(out)
+
+    @staticmethod
+    def block_plain_text(blocks: list, block_no: int) -> str:
+        """一个块的纯文本形态。"""
+        if not blocks or not (1 <= block_no <= len(blocks)):
+            return ""
+        block = blocks[block_no - 1]
+        lines = []
+        for message in block.get("items") or []:
+            who = message.get("sender_name") or message.get("sender", "")
+            lines.append("群 " + str(message.get("gid", "")) + " · " + str(who))
+            lines.append("   " + str(message.get("text") or "（无文字）"))
+            for pic in message.get("images") or []:
+                lines.append("   图片：" + str(pic))
+        return chr(10).join(lines)
+
+    @staticmethod
+    def block_card_nodes(blocks: list, block_no: int) -> list:
+        """一个块的内嵌卡片数据：[（发布者, [（类型, 值）, …]）, …]。
+
+        类型是 text / image。这里只吐数据，拼 Node 是 push.py 的事。
+        """
+        if not blocks or not (1 <= block_no <= len(blocks)):
+            return []
+        block = blocks[block_no - 1]
+        out = []
+        for message in block.get("items") or []:
+            who = str(message.get("sender_name") or message.get("sender") or "")
+            parts = [("text", str(message.get("text") or "（无文字）"))]
+            for pic in message.get("images") or []:
+                parts.append(("image", str(pic)))
+            out.append((who, parts))
+        return out
 
     # ── 降级渲染 ────────────────────────────────────────────────
 
@@ -313,13 +576,16 @@ class Digester:
         if group_messages:
             lines.extend([""] * (1 if first_block else 3))
             first_block = False
-            lines.append("【群消息】")
-            for index, message in enumerate(group_messages, 1):
-                lines.append(
-                    f"{index}. 群 {message.get('gid', '')} · "
-                    f"发布者 {message.get('sender', '')}"
-                )
-                lines.append(f"   {message.get('text', '')}")
+            lines.append("【群消息转发】")
+            for index, block in enumerate(group_messages, 1):
+                for message in block.get("items") or []:
+                    who = message.get("sender_name") or message.get("sender", "")
+                    lines.append(
+                        f"{index}. 群 {message.get('gid', '')} · 发布者 {who}"
+                    )
+                    lines.append(f"   {message.get('text', '') or '（无文字）'}")
+                    for pic in (message.get("images") or []):
+                        lines.append(f"   图片：{pic}")
 
         if len(lines) == 1:
             lines.append("")

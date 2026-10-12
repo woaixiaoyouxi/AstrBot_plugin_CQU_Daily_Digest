@@ -20,15 +20,26 @@ from astrbot.api.star import Context, Star, register
 
 
 def _bootstrap_path() -> None:
-    """把插件目录挂到 sys.path，好让 cqu_digest 这个子包能被导入。
+    """挂 sys.path + 清掉本插件的子包缓存。两件事都必须做。
 
-    AstrBot 是按【文件】加载 main.py 的（不是按包），所以这里得自己加路径。
-    包名带前缀还顺手避开了一个雷：以前本插件与 dut_notices 都往 sys.modules
+    ① AstrBot 是按【文件】加载 main.py 的（不是按包），所以得自己加路径。
+
+    ② ★ 热重载必须清 sys.modules。Python 的 import 会先查 sys.modules，
+       不把 cqu_digest.* 清掉的话，点了【重载插件】也只会拿到旧模块 ——
+       表现就是"改了代码不生效，只有重启才行"。
+       （原来的 _load_local_module 里有 sys.modules.pop，换成包导入时漏了。）
+
+    包名带前缀还顺手避开一个雷：以前本插件与 dut_notices 都往 sys.modules
     塞顶层的 sources / parsers，再装第三个同名模块的插件就可能互相覆盖。
     """
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)
+    stale = [n for n in list(sys.modules) if n == "cqu_digest" or n.startswith("cqu_digest.")]
+    for name in stale:
+        sys.modules.pop(name, None)
+    if stale:
+        logger.info(f"[简报] 热重载：清掉 {len(stale)} 个旧的子包缓存")
 
 
 _bootstrap_path()
@@ -68,6 +79,10 @@ class CquDailyDigestPlugin(
         # 公开查询的冷却缓存：umo -> (取到的时刻, 简报文本)。
         # 不写 KV 也不写 digest_last——digest_last 是「他那一份」，被群查询覆盖掉就乱了。
         self._query_cache: dict[str, tuple[float, str]] = {}
+        # 机器人自己的 QQ 号：event 触发时拿到就存起来，定时推送时用它
+        self._cached_self_id = ""
+        # 合并转发失败的原因（降级提示要说清）
+        self._forward_fail_reason = ""
 
         self._fetcher = NoticeFetcher(self.config)
         self._store = DigestStore(self.get_kv_data, self.put_kv_data)
@@ -131,11 +146,12 @@ class CquDailyDigestPlugin(
             return
 
         handler = {
+            "all": self._cmd_query_all,
             "help": self._cmd_help,
             "now": self._cmd_now,
+            "reset": self._cmd_reset,
+            "status": self._cmd_status,
             "test": self._cmd_test,
-            "last": self._cmd_last,
-            "sources": self._cmd_sources,
         }.get(action)
         if handler is None:
             # 认不出的子指令：给说明。能走到这里说明已被授权，回一句不算冒泡。

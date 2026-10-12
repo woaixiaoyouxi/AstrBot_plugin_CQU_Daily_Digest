@@ -12,7 +12,10 @@ ZWSP = "\u200b"
 
 
 class PushMixin:
-    async def _push(self, text: str) -> bool:
+    async def _push(self, text: str, blocks: list | None = None) -> bool:
+        if not self._cfg_bool("push_enabled", True):
+            logger.info("[简报] push_enabled 关着，本次不推送（抓取和记账照常）")
+            return False
         targets = self._push_targets()
         if not targets:
             logger.warning("[简报] 没有推送目标，本次简报只写进了 digest_last")
@@ -20,11 +23,11 @@ class PushMixin:
 
         sent = False
         for umo in targets:
-            if await self._send_one(umo, text):
+            if await self._send_one(umo, text, blocks):
                 sent = True
         return sent
 
-    async def _send_one(self, umo: str, text: str) -> bool:
+    async def _send_one(self, umo: str, text: str, blocks: list | None = None) -> bool:
         """发一个会话。先试合并转发；失败就退回纯文本重发一次。
 
         合并转发依赖协议端实现（NapCat 认 send_private_forward_msg），
@@ -44,8 +47,9 @@ class PushMixin:
                     )
         try:
             # send_message 只在会话格式非法时抛错；平台没接上时返回 False
+            plain = self._digester.expand_block_text(text, blocks or [])
             ok = await self.context.send_message(
-                umo, MessageChain().message(f"{ZWSP}{text}{ZWSP}")
+                umo, MessageChain().message(f"{ZWSP}{plain}{ZWSP}")
             )
         except Exception as exc:
             logger.warning(f"[简报] 推送到 {umo} 失败：{exc}")
@@ -57,44 +61,144 @@ class PushMixin:
             )
         return bool(ok)
 
-    def _build_forward_chain(self, text: str):
-        """把简报切成节点拼成合并转发链。切不出来或超上限就返回 None（走纯文本）。"""
+    def _self_id(self) -> str:
+        """机器人自己的 QQ 号。
+
+        合并转发每个节点都要带一个 user_id，否则协议端可能直接拒收。
+        定时任务没有 event，所以顺序是：
+            ① 配置里的 bot_uin
+            ② 最近一次从 event 拿到的（_remember_self_id 缓存的）
+            ③ 实在没有才退回 0（并记下原因，降级时会写给你看）
+        """
+        up = str(self.config.get("bot_uin", "") or "").strip()
+        if up:
+            return up
+        return str(getattr(self, "_cached_self_id", "") or "").strip()
+
+    def _remember_self_id(self, event: Any) -> str:
+        """从 event 里取机器人 QQ 号并存起来，给以后的定时推送用。"""
+        getter = getattr(event, "get_self_id", None)
+        if not callable(getter):
+            return ""
         try:
-            from astrbot.api.message_components import Node, Nodes, Plain
-        except Exception as exc:
-            logger.warning(f"[简报] 取不到合并转发组件，改用纯文本：{exc}")
+            sid = str(getter() or "").strip()
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning(f"[简报] 取机器人 QQ 号失败：{exc}")
+            return ""
+        if sid:
+            self._cached_self_id = sid
+        return sid
+
+    def _build_forward_chain(self, text: str, uin: str = "", blocks: list | None = None):
+        """把简报切成节点拼成合并转发链。切不出来或超上限就返回 None（走纯文本）。
+
+        失败时把原因记在 self._forward_fail_reason，好让降级提示说得清。
+        """
+        self._forward_fail_reason = ""
+        try:
+            from astrbot.api.message_components import Image, Node, Nodes, Plain
+        except Exception as exc:                                # noqa: BLE001
+            self._forward_fail_reason = f"取不到合并转发组件：{exc}"
+            logger.warning("[简报] " + self._forward_fail_reason)
             return None
 
         segs = self._digester.split_segments(text)
         limit = self._cfg_int("max_forward_nodes", 40)
-        if not segs or len(segs) > limit:
-            logger.info(f"[简报] 节点数 {len(segs)} 超出上限 {limit}，改用纯文本")
+        # 群消息原文会被展开成额外的节点，所以按展开后的数量估算上限
+        estimate = 0
+        for _name, body in segs:
+            estimate += 1
+            for line in body.split(chr(10)):
+                if self._digester.block_ref_of(line) is not None:
+                    estimate += 1
+        if not segs or estimate > limit:
+            self._forward_fail_reason = f"节点数 {estimate} 超出上限 {limit}"
+            logger.info("[简报] " + self._forward_fail_reason + "，改用纯文本")
             return None
 
-        uin = str(self.config.get("bot_uin", "") or "").strip() or "0"
-        nodes = [Node(content=[Plain(body)], name=name, uin=uin) for name, body in segs]
-        logger.info(f"[简报] 合并转发：{len(nodes)} 个节点，uin={uin}")
+        use_uin = (uin or self._self_id() or "").strip()
+        if not use_uin:
+            self._forward_fail_reason = "拿不到机器人 QQ 号（可在插件配置里填 bot_uin）"
+            logger.warning("[简报] " + self._forward_fail_reason)
+            use_uin = "0"
+
+        nodes = []
+        for name, body in segs:
+            refs = [
+                self._digester.block_ref_of(line)
+                for line in body.split(chr(10))
+                if self._digester.block_ref_of(line) is not None
+            ]
+            if refs and blocks:
+                # 原文内嵌卡片在前，去掉占位符的规范化条目在后
+                for block_no in refs:
+                    nodes.append(
+                        self._make_block_node(block_no, blocks, use_uin, Node, Plain, Image)
+                    )
+                cleaned = chr(10).join(
+                    line for line in body.split(chr(10))
+                    if self._digester.block_ref_of(line) is None
+                ).strip()
+                nodes.append(Node(content=[Plain(cleaned or name)], name=name, uin=use_uin))
+            else:
+                cleaned = chr(10).join(
+                    line for line in body.split(chr(10))
+                    if self._digester.block_ref_of(line) is None
+                ).strip()
+                nodes.append(Node(content=[Plain(cleaned or body)], name=name, uin=use_uin))
+        logger.info(f"[简报] 合并转发：{len(nodes)} 个节点，uin={use_uin}")
         return MessageChain([Nodes(nodes)])
 
-    async def _emit_digest(self, event: AstrMessageEvent, text: str, note: str = ""):
+    def _make_block_node(self, block_no: int, blocks: list, uin: str,
+                         Node, Plain, Image):
+        """把一个群消息块拼成【内嵌卡片节点】（Node 里塞 Node）。
+
+        2026-10-12 实测：NapCat 认这种嵌套；塞 Nodes 容器会报
+        「未知的消息类型：undefined」，所以只能塞【单个 Node】。
+        """
+        inner = []
+        for who, parts in self._digester.block_card_nodes(blocks, block_no):
+            content = []
+            for kind, value in parts:
+                if kind == "image":
+                    try:
+                        content.append(Image(file=value))
+                    except Exception:                       # noqa: BLE001
+                        content.append(Plain("图片：" + value))
+                else:
+                    content.append(Plain(value))
+            inner.append(Node(content=content or [Plain("（空）")],
+                              name=who or "群消息", uin=uin))
+        if not inner:
+            inner = [Node(content=[Plain("（空）")], name="群消息", uin=uin)]
+        return Node(content=[Plain("群消息原文")] + inner, name="群消息原文", uin=uin)
+
+    async def _emit_digest(self, event: AstrMessageEvent, text: str, note: str = "",
+                          blocks: list | None = None):
         """把简报正文以合并转发卡片回给当前会话；不行就退回纯文本。
 
         查询 / test / last / now 的正文都走这里，
         保证"点进去一条一条"的观感一致。
         """
         body = (note + chr(10) * 2 + text) if note else text
-        chain = self._build_forward_chain(body)
+        sid = self._remember_self_id(event)
+        chain = self._build_forward_chain(body, uin=sid, blocks=blocks)
+        why = ""
         if chain is not None:
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             try:
                 ok = await self.context.send_message(umo, chain)
                 if ok:
                     return
-                logger.warning("[简报] 合并转发没发出去，本条改用纯文本")
-            except Exception as exc:
-                logger.warning(
-                    f"[简报] 合并转发失败（{type(exc).__name__}: {exc}），本条改用纯文本"
-                )
-        yield event.plain_result(body)
+                why = "平台没接上（send_message 返回 False）"
+            except Exception as exc:                            # noqa: BLE001
+                why = f"{type(exc).__name__}: {exc}"
+        else:
+            why = getattr(self, "_forward_fail_reason", "") or "未知原因"
+        logger.warning(f"[简报] 合并转发没成功，本条改用纯文本：{why}")
+        # 把原因一并回给你——日志文件默认是关的，不然你什么都看不到
+        yield event.plain_result("[合并转发没成功：" + why + "]"
+                                + chr(10) * 2
+                                + self._digester.expand_block_text(body, blocks or []))
 
     # ── 群消息采集（绝不 yield，yield 会把内容发回群里）─────────

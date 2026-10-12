@@ -9,6 +9,12 @@
                 "default": "09:00",
                 "hint": "每天到这个点生成并推送简报；插件重启会重新计时"
             },
+            "push_enabled": {
+                "description": "总开关",
+                "type": "bool",
+                "default": true,
+                "hint": "关掉 = 定时不再往你 QQ 推送（抓取和记账照常跑，只是不发）。想安静几天又不想动推送时间就关它"
+            },
             "catch_up_on_start": {
                 "description": "启动时补推",
                 "type": "bool",
@@ -36,14 +42,14 @@
             "max_forward_nodes": {
                 "description": "合并转发最多几个节点",
                 "type": "int",
-                "default": 40,
-                "hint": "节点数超过这个值就改用纯文本发送（QQ 对转发节点数有上限）"
+                "default": 60,
+                "hint": "节点数超过这个值就改用纯文本发送（QQ 对转发节点数有上限）。群消息转发会把原文做成【内嵌卡片】，一个块算一个节点，所以上限别设太小"
             },
             "bot_uin": {
                 "description": "转发节点显示的身份 QQ 号",
                 "type": "string",
                 "default": "",
-                "hint": "合并转发里每个节点都要带一个「谁说的」，填机器人的 QQ 号头像才正常。留空则用 0，可能显示成默认头像"
+                "hint": "合并转发里每个节点都要带一个「谁说的」，填机器人的 QQ 号头像才正常。留空则退到「最近一次从 event 拿到的号」，再拿不到才用 0。2026-10-12 实测这台机器人的号是 2136566003"
             }
         }
     },
@@ -136,13 +142,19 @@
                 "description": "管理员 QQ 号（可用全部指令）",
                 "type": "list",
                 "default": [],
-                "hint": "填你自己的 QQ 号。只有列表里的 QQ 能发 /digest now、test、last 这类管理指令，其他人发什么都不回（静默）。⚠️ 留空 = 谁都不能用，不是「不设限」——默认锁死是为了防止别人装完忘配就把 /digest now 对外开放"
+                "hint": "填你自己的 QQ 号。只有列表里的 QQ 能发 /digest now、test、status、reset 这类管理指令，其他人发什么都不回（静默）。⚠️ 留空 = 谁都不能用，不是「不设限」——默认锁死是为了防止别人装完忘配就把 /digest now 对外开放"
             },
             "command_allow_groups": {
                 "description": "开放查询的群号",
                 "type": "list",
                 "default": [],
-                "hint": "填**群号**（不是 QQ 号）。名单里的群里任何人都能发 /digest 现算一份（只含校内通知与竞赛，不含群消息），但用不了管理指令，也不会被主动推送。⚠️ 留空 = 群里谁都不能查。想让自己私聊也能用，走上面的管理员名单"
+                "hint": "填**群号**（不是 QQ 号）。名单里的群里任何人都能发 /digest（增量）和 /digest all（库里所有没过期的），但用不了管理指令，也不会被主动推送。⚠️ 留空 = 群里谁都不能查。想让自己私聊也能用，走上面的管理员名单"
+            },
+            "query_recent_days": {
+                "description": "公开查询的时间窗口（天）",
+                "type": "int",
+                "default": 30,
+                "hint": "列表页本来就只挂最近几周的条目，30 天基本等于全量。调小 = 更短更快，调大 = 更全但更长"
             },
             "query_cooldown_seconds": {
                 "description": "查询冷却（秒）",
@@ -183,6 +195,41 @@
                 "type": "list",
                 "default": [],
                 "hint": "留空 = 全部都要；填了则只保留含任一关键词的消息。这是按「内容」筛，不区分群"
+            },
+            "enable_group_forward": {
+                "description": "群消息转发（单独一类）",
+                "type": "bool",
+                "default": true,
+                "hint": "开：群消息按「块」聚起来，先让模型判断是不是通知，是的话把原文（消息1+消息2+图）做成内嵌卡片，下面附一条统一格式的条目，归在【群消息转发】类。关：整个群消息那部分都不进简报"
+            },
+            "group_aggregate_minutes": {
+                "description": "群消息聚合窗口（分钟）",
+                "type": "int",
+                "default": 10,
+                "hint": "同群、相邻两条间隔不超过这么久就当成同一条通知的几段（通知群的格式一般是 消息1+消息2+图）。调大 = 更容易聚成一块，调小 = 分得更碎"
+            }
+        }
+    },
+    "到期提醒": {
+        "description": "快到截止日的单独拎出来，放在简报最前面",
+        "type": "object",
+        "items": {
+            "deadline_alert_enabled": {
+                "description": "启用到期提醒",
+                "type": "bool",
+                "default": true
+            },
+            "deadline_alert_days": {
+                "description": "提前几天开始提醒",
+                "type": "int",
+                "default": 7,
+                "hint": "只提醒【已经推送过一遍】的通知——新通知第一次出现时不会重复进这一栏，所以同一条在推送里只会出现一次"
+            },
+            "no_due_expire_days": {
+                "description": "没写截止日的条目保质期（天）",
+                "type": "int",
+                "default": 30,
+                "hint": "没截止日的条目过了这么多天就不再算「未过期」，/digest all 里不再出现，也会从条目库里清掉。有截止日的按截止日算"
             }
         }
     }
