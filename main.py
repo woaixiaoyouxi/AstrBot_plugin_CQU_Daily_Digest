@@ -143,28 +143,33 @@ class CquDailyDigestPlugin(
         """每日简报：直接发 /digest 取一份，或跟 help/now/test/all/status/reset 子指令。"""
         action = str(sub or "").strip().lower()
 
-        if action in ("", "query"):
-            async for result in self._cmd_query(event):
-                yield result
-            return
-
-        handler = {
-            "all": self._cmd_query_all,
-            "help": self._cmd_help,
-            "now": self._cmd_now,
-            "reset": self._cmd_reset,
-            "status": self._cmd_status,
-            "test": self._cmd_test,
-        }.get(action)
-        if handler is None:
-            # 认不出的子指令：给说明。能走到这里说明已被授权，回一句不算冒泡。
-            if self._deny(event):
+        # ★ 整个指令处理包在 try/finally 里：不管走哪个分支、有没有异常，
+        #   结束都 stop_event() —— 否则消息会继续流向普通对话，LLM 又接一句。
+        try:
+            if action in ("", "query"):
+                async for result in self._cmd_query(event):
+                    yield result
                 return
-            yield event.plain_result(self._help_text())
-            return
 
-        async for result in handler(event):
-            yield result
+            handler = {
+                "all": self._cmd_query_all,
+                "help": self._cmd_help,
+                "now": self._cmd_now,
+                "reset": self._cmd_reset,
+                "status": self._cmd_status,
+                "test": self._cmd_test,
+            }.get(action)
+            if handler is None:
+                # 认不出的子指令：给说明。能走到这里说明已被授权，回一句不算冒泡。
+                if self._deny(event):
+                    return
+                yield event.plain_result(self._help_text())
+                return
+
+            async for result in handler(event):
+                yield result
+        finally:
+            event.stop_event()
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
