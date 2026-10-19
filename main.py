@@ -168,10 +168,60 @@ class CquDailyDigestPlugin(
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def on_group_message(self, event: AstrMessageEvent):
+        # ★ 群策略闸门：先看这个群是什么模式，再决定要不要采集 / 要不要让 AI 接话
+        mode = self._session_mode(event)
+        if mode == "ignore":
+            event.stop_event()
+            return
         try:
             await self._collector.record(event)
         except Exception as exc:
             logger.warning(f"[简报] 群消息入库失败：{exc}")
+        if mode == "readonly_notice":
+            # 只采集进简报，一个字都不说
+            event.stop_event()
+        elif mode == "chat_passive":
+            # 只在被 @ 或叫名字时回
+            if not self._is_addressed_to_bot(event):
+                event.stop_event()
+        # chat_active：放行，走 AstrBot 原生对话
+
+    def _session_mode(self, event: AstrMessageEvent) -> str:
+        """查会话模式：chat_active / chat_passive / readonly_notice / ignore。
+
+        配置格式（list 每项一条）："<群号或QQ号>:<模式>"
+        没列出的会话默认 ignore（什么都不做）。
+        """
+        spec = self._cfg_list("session_modes", [])
+        mapping: dict[str, str] = {}
+        for line in spec:
+            key, _, value = str(line).partition(":")
+            key = key.strip()
+            if key:
+                mapping[key] = (value.strip() or "ignore")
+        try:
+            gid = str(event.get_group_id() or "")
+        except Exception:
+            gid = ""
+        try:
+            uid = str(event.get_sender_id() or "")
+        except Exception:
+            uid = ""
+        for key in (gid, uid):
+            if key and key in mapping:
+                return mapping[key]
+        return "ignore"
+
+    def _is_addressed_to_bot(self, event: AstrMessageEvent) -> bool:
+        """这条消息是不是在叫机器人（@ 或叫名字）。"""
+        try:
+            if bool(getattr(event, "is_at_or_wake_command", False)):
+                return True
+        except Exception:
+            pass
+        text = str(getattr(event, "message_str", "") or "")
+        name = str(self.config.get("bot_name", "") or "").strip()
+        return bool(name) and name in text
 
     # ── 指令 ────────────────────────────────────────────────────
     #

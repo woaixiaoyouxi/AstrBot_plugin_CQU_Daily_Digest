@@ -9,7 +9,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain
 from cqu_digest.base import CHINA_TZ, Notice
 from cqu_digest.digest import blocks as block_utils
 from cqu_digest.fetch.sources import SOURCES_BY_KEY
-from cqu_digest.digest.entries import days_between, split_entries, to_records
+from cqu_digest.digest.entries import days_between, is_valid, render_from_entries, split_entries, to_records
 
 BODY_FETCH_CONCURRENCY = 5
 
@@ -129,6 +129,14 @@ class PipelineMixin:
             # 被"结"关掉的块不进简报
             group_messages = [b for b in raw_blocks if not b.get("closed")]
 
+        # ★ 全量模式：抓取+写库照常跑（入库要靠 build 出的结构化条目），
+        #   最后再用库里的全量覆盖要推送的 text。
+        full_mode = (
+            self._cfg_bool("push_full_mode", False)
+            and not dry_run
+            and not only_new
+        )
+
         text = await self._digester.build(
             self.context,
             date_str=self._today(),
@@ -152,6 +160,10 @@ class PipelineMixin:
             )
             if removed:
                 logger.info(f"[简报] 条目库清理 {removed} 条过期记录")
+
+        # ★ 全量模式：库写完后再渲染一次全量（未过期的 + 新抓的都在里面）
+        if full_mode:
+            text = await self._render_full_from_store(self._today())
 
         # 群消息的「块号：N」换成占位符。放在入库之后 —— 入库时要靠那行配对。
         if group_messages:
@@ -345,5 +357,28 @@ class PipelineMixin:
             return ""
         city = str(self.config.get("weather_city", "Chongqing") or "Chongqing")
         return await self._weather.today(city)
+
+    async def _render_full_from_store(self, today: str) -> str:
+        """从条目库里渲染一份「全量」简报（所有未过期的）。
+
+        和 /digest all 共用同一套逻辑：倒序取未过期 → 截断 → 渲染 → 加头 + 到期提醒。
+        """
+        limit = self._cfg_int("no_due_expire_days", 30)
+        entries = await self._store.get_entries()
+        # 倒序：upsert 是往后追加，新的在后面；截断时该保新的
+        merged = [r for r in reversed(list(entries.values())) if is_valid(r, today, limit)]
+        if not merged:
+            return ""
+        cap = self._cfg_int("query_all_max_items", 40)
+        if cap > 0 and len(merged) > cap:
+            merged = merged[:cap]
+        body = render_from_entries(merged)
+        if not body:
+            return ""
+        head = self._digester.header(today, await self._weather_text())
+        due = await self._due_soon_items(today)
+        if due:
+            head = head + chr(10) * 2 + self._digester.render_due_soon(due)
+        return head + chr(10) * 2 + body
 
     # ── 推送 ────────────────────────────────────────────────────

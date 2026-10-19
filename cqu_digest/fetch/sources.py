@@ -1,6 +1,8 @@
 """重庆大学信息源声明。
 
-加一个源 = 加一个 dict。字段说明：
+加一个源 = 加一个 dict（内置），或者在插件配置的 custom_sources 里填 JSON。
+
+字段说明：
 
     key               唯一标识，用于去重（改了 key 会导致该源已推条目重推）
     name              显示名，会出现在简报里
@@ -16,11 +18,18 @@
     article_selector  可选，详情页正文容器的选择器。配了它，抓正文时就只从
                       这个容器里取；取不到宁可空手而归，也不退回整页——整页
                       抓回来的是全站导航菜单，跟正文毫无关系。
+
+★ custom_sources 里 parser 用字符串表达：
+    parse_title_attr          取 <a title="..."> 的 title 属性
+    parse_text_content        取整段文本并清洗
+    child_text:<选择器>       在条目内部再选一层，例如 child_text:.tit
 """
 
+import json
 from collections.abc import Callable
 from typing import TypedDict
 
+from astrbot.api import logger
 from bs4 import Tag
 
 from cqu_digest.fetch.parsers import child_text, parse_text_content, parse_title_attr
@@ -44,6 +53,22 @@ class SourceConfig(TypedDict, total=False):
     extra_urls: list[str]
     excerpt_selector: str
     article_selector: str
+
+
+# ── 解析器注册表 ────────────────────────────────────────────────
+def resolve_parser(spec: str) -> Parser | None:
+    """把 "child_text:.tit" / "parse_title_attr" 这种字符串还原成函数。"""
+    text = (spec or "").strip()
+    if not text:
+        return None
+    if text == "parse_title_attr":
+        return parse_title_attr
+    if text == "parse_text_content":
+        return parse_text_content
+    if text.startswith("child_text:"):
+        arg = text.split(":", 1)[1].strip()
+        return child_text(arg) if arg else None
+    return None
 
 
 SOURCES: list[SourceConfig] = [
@@ -93,6 +118,103 @@ SOURCES: list[SourceConfig] = [
     },
 ]
 
+
+# ── aTrust 代理 ────────────────────────────────────────────────
+# 校外访问校内站时，把 URL 换成 aTrust 的反向代理地址。
+# 公式见 https://cqulug.club/wiki/atrust/ ：
+#   主机名里的 . 换成 -，HTTPS 再加 -s 后缀，拼 .atrust.cqu.edu.cn
+# 例：www.cqu.edu.cn  ->  www-cqu-edu-cn-s.atrust.cqu.edu.cn
+ATRUST_MAP: dict[str, str] = {
+    "www.cqu.edu.cn": "www-cqu-edu-cn-s.atrust.cqu.edu.cn",
+    "sxic.cqu.edu.cn": "sxic-cqu-edu-cn-s.atrust.cqu.edu.cn",
+}
+
+
+def atrust_url(url: str) -> str:
+    """把校内 URL 换成 aTrust 代理地址；没有对应映射就原样返回。"""
+    for origin, proxy in ATRUST_MAP.items():
+        prefix = f"https://{origin}"
+        if url.startswith(prefix):
+            return f"https://{proxy}" + url[len(prefix):]
+    return url
+
+
+# ── 自定义源 ────────────────────────────────────────────────────
+def parse_custom_sources(raw: str) -> list[SourceConfig]:
+    """把配置里的 custom_sources（JSON 字符串）解析成源列表。
+
+    格式错了不 raise，只打日志并返回空列表——不能因为一个手滑的逗号
+    就把整个插件弄挂。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        logger.warning(f"[简报] custom_sources 不是合法 JSON，已忽略：{exc}")
+        return []
+    if not isinstance(data, list):
+        logger.warning("[简报] custom_sources 必须是 JSON 数组，已忽略")
+        return []
+
+    result: list[SourceConfig] = []
+    for index, item in enumerate(data):
+        if not isinstance(item, dict):
+            continue
+        parser_spec = str(item.get("parser", "") or "")
+        parser = resolve_parser(parser_spec)
+        if parser is None:
+            logger.warning(
+                f"[简报] custom_sources 第 {index + 1} 项的 parser 无法识别"
+                f"（{parser_spec!r}），已跳过。可用：parse_title_attr / "
+                f"parse_text_content / child_text:<选择器>"
+            )
+            continue
+        cfg: SourceConfig = {
+            "key": str(item.get("key", "") or "").strip(),
+            "name": str(item.get("name", "") or "").strip(),
+            "url": str(item.get("url", "") or "").strip(),
+            "selector": str(item.get("selector", "") or "").strip(),
+            "parser": parser,
+            "category": str(item.get("category", "") or "campus").strip(),
+        }
+        for opt in ("base_url", "excerpt_selector", "article_selector"):
+            value = str(item.get(opt, "") or "").strip()
+            if value:
+                cfg[opt] = value  # type: ignore[literal-required]
+        extra = item.get("extra_urls")
+        if isinstance(extra, list):
+            urls = [str(u).strip() for u in extra if str(u).strip()]
+            if urls:
+                cfg["extra_urls"] = urls
+        if not (cfg["key"] and cfg["url"] and cfg["selector"]):
+            logger.warning(
+                f"[简报] custom_sources 第 {index + 1} 项缺 key/url/selector，已跳过"
+            )
+            continue
+        result.append(cfg)
+    if result:
+        logger.info(f"[简报] 已加载 {len(result)} 个自定义源：{[s['key'] for s in result]}")
+    return result
+
+
+def load_sources(custom_raw: str = "") -> tuple[list[SourceConfig], dict[str, SourceConfig]]:
+    """内置 + 自定义合并。返回 (源列表, key→源)。
+
+    key 冲突时自定义覆盖内置——这样想临时改内置源的 URL，不用动代码。
+    """
+    merged: dict[str, SourceConfig] = {}
+    for source in SOURCES:
+        key = str(source.get("key", "") or "")
+        if key:
+            merged[key] = source
+    for source in parse_custom_sources(custom_raw):
+        merged[str(source["key"])] = source
+    return list(merged.values()), merged
+
+
+# 兼容旧代码的直接引用（只含内置源）
 SOURCES_BY_KEY: dict[str, SourceConfig] = {
     str(source["key"]): source for source in SOURCES if source.get("key")
 }

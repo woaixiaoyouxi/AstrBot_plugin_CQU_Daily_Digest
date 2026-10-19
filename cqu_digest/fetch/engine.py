@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup, Tag
 from astrbot.api import logger
 
 from cqu_digest.base import CHINA_TZ, Notice
-from cqu_digest.fetch.sources import SOURCES, SourceConfig
+from cqu_digest.fetch.sources import SourceConfig, atrust_url, load_sources
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -44,6 +44,12 @@ EXCERPT_LIMIT = 500
 class NoticeFetcher:
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = config or {}
+        # aTrust 校外访问凭证。填了就自动把校内 URL 换成代理地址、并带上 Cookie
+        self.atrust_cookie = str(self.config.get("atrust_cookie", "") or "").strip()
+        # 内置源 + custom_sources 合并后的结果
+        self.sources, self.sources_by_key = load_sources(
+            str(self.config.get("custom_sources", "") or "")
+        )
 
     # ── 列表抓取 ────────────────────────────────────────────────
 
@@ -57,7 +63,7 @@ class NoticeFetcher:
 
         selected = [
             source
-            for source in SOURCES
+            for source in self.sources
             if (source_keys is None or source.get("key") in source_keys)
             and (categories is None or source.get("category") in categories)
             and source.get("url")
@@ -70,7 +76,7 @@ class NoticeFetcher:
         async with httpx.AsyncClient(
             timeout=timeout_sec,
             follow_redirects=True,
-            headers=DEFAULT_HEADERS,
+            headers=self._base_headers(),
         ) as client:
             results = await asyncio.gather(
                 *(self._fetch_source_notices(client, source) for source in selected),
@@ -97,7 +103,8 @@ class NoticeFetcher:
     async def _fetch_source_notices(
         self, client: httpx.AsyncClient, source: SourceConfig
     ) -> list[Notice]:
-        page_urls = [str(source["url"]), *source.get("extra_urls", [])]
+        page_urls = [atrust_url(str(source["url"]))]
+        page_urls += [atrust_url(u) for u in source.get("extra_urls", [])]
         notices: list[Notice] = []
         seen_links: set[str] = set()
 
@@ -125,7 +132,8 @@ class NoticeFetcher:
                 if not title:
                     continue
 
-                base_url = source.get("base_url") or page_url
+                # base_url 保持原始地址 —— 存进简报的 link 要是干净的校内链接
+                base_url = source.get("base_url") or str(source["url"])
                 full_url = urljoin(base_url, href)
                 if full_url in seen_links:
                     continue
@@ -180,7 +188,7 @@ class NoticeFetcher:
         async with httpx.AsyncClient(
             timeout=self._cfg_int("request_timeout_seconds", 20),
             follow_redirects=True,
-            headers=DEFAULT_HEADERS,
+            headers=self._base_headers(),
         ) as client:
             yield client
 
@@ -200,6 +208,7 @@ class NoticeFetcher:
         """
         if not url:
             return ""
+        url = atrust_url(url)  # 校外走代理
         try:
             if client is not None:
                 response = await client.get(url)
@@ -294,8 +303,15 @@ class NoticeFetcher:
         digest = sha1(f"{source_key}|{link}".encode("utf-8")).hexdigest()
         return f"{source_key}:{digest}"
 
-    def _request_headers(self, source: SourceConfig, request_url: str | None = None) -> dict[str, str]:
+    def _base_headers(self) -> dict[str, str]:
+        """默认请求头 + aTrust cookie（配了才带）。"""
         headers = dict(DEFAULT_HEADERS)
+        if self.atrust_cookie:
+            headers["Cookie"] = self.atrust_cookie
+        return headers
+
+    def _request_headers(self, source: SourceConfig, request_url: str | None = None) -> dict[str, str]:
+        headers = self._base_headers()
         headers["Referer"] = str(source.get("base_url") or request_url or source.get("url") or "")
         return headers
 

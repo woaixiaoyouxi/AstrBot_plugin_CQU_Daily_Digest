@@ -27,6 +27,12 @@
                 "default": [],
                 "hint": "会话标识（umo），私聊和群都行：私聊形如 <平台ID>:FriendMessage:<QQ号>，群形如 <平台ID>:GroupMessage:<群号>，平台 ID 通常是 aiocqhttp。**手填**（登记指令已取消）"
             },
+            "push_full_mode": {
+                "description": "每次推送全量（而不是只推新的）",
+                "type": "bool",
+                "default": false,
+                "hint": "开：每天早上把条目库里所有没过期的都发一遍（等于每天自动跑一次 /digest all），旧内容会重复出现。关：只推这次新抓到的"
+            },
             "max_digest_chars": {
                 "description": "简报最大字数",
                 "type": "int",
@@ -131,6 +137,18 @@
                 "type": "bool",
                 "default": false,
                 "hint": "竞赛页正文往往很长，开启会明显拖慢速度"
+            },
+            "atrust_cookie": {
+                "description": "aTrust 校外访问凭证（Cookie）",
+                "type": "string",
+                "default": "",
+                "hint": "校外部署时填。浏览器登录 https://sso.cqu.edu.cn/login?service=https://atrust.cqu.edu.cn:443/passport/v1/auth/cas?sfDomain=CAS 后，F12 → 应用 → Cookies → 复制 sdp_user_token 的值，格式 sdp_user_token=<值>。留空 = 校园网内直连；填了 = 自动改用 aTrust 代理地址。会话过期需重新获取"
+            },
+            "custom_sources": {
+                "description": "自定义信息源（JSON）",
+                "type": "string",
+                "default": "",
+                "hint": "填一个 JSON 数组，每项是一个源。parser 用字符串：parse_title_attr / parse_text_content / child_text:<选择器>。key 和内置源重复时会覆盖内置。格式错了会被忽略，并在日志里报错"
             }
         }
     },
@@ -243,6 +261,24 @@
                 "type": "list",
                 "default": [],
                 "hint": "这条消息【引用了别人】且不超过 10 个字时，含这些词就算「结」。留空 = 用内置的：截止/结。（引用回复是人为动作、又很短，基本就是收尾，所以可以放宽到按包含判）"
+            }
+        }
+    },
+    "群策略": {
+        "description": "每个会话读不读、回不回",
+        "type": "object",
+        "items": {
+            "session_modes": {
+                "description": "会话模式表",
+                "type": "list",
+                "default": [],
+                "hint": "每项一条，格式「群号或QQ号:模式」。模式有：chat_active（读+主动参与聊天）、chat_passive（读+只在被@时回）、readonly_notice（读+进简报+不说话）、ignore（什么都不做）。**没列出的会话默认 ignore**"
+            },
+            "bot_name": {
+                "description": "机器人的名字（用于判断有没有被叫到）",
+                "type": "string",
+                "default": "",
+                "hint": "填了之后，聊天消息里出现这个名字就算被叫到（配合 chat_passive 模式用）"
             }
         }
     },
