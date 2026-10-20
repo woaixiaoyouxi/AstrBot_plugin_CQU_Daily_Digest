@@ -55,6 +55,7 @@ from cqu_digest.pipeline import PipelineMixin                  # noqa: E402
 from cqu_digest.push import PushMixin                          # noqa: E402
 from cqu_digest.schedule import ScheduleMixin                  # noqa: E402
 from cqu_digest.digest.storage import DigestStore              # noqa: E402
+from cqu_digest.manual import ManualMixin                      # noqa: E402
 from cqu_digest.base import CHINA_TZ, Notice  # noqa: E402
 from cqu_digest.fetch.engine import NoticeFetcher  # noqa: E402
 from cqu_digest.fetch.sources import (                         # noqa: E402
@@ -66,7 +67,7 @@ from cqu_digest.fetch.weather import WeatherClient             # noqa: E402
 
 class CquDailyDigestPlugin(
     ConfigMixin, ScheduleMixin, PipelineMixin, PushMixin, AuthMixin,
-    CommandsMixin, Star,
+    CommandsMixin, ManualMixin, Star,
 ):
     def __init__(self, context: Context, config: dict[str, Any] | None = None):
         super().__init__(context)
@@ -104,11 +105,13 @@ class CquDailyDigestPlugin(
             logger.info("[简报] 启动补偿：今天已过推送点且尚未推送，后台补跑一次")
             self._catchup_task = asyncio.create_task(self._catch_up())
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
+        self._reminder_task = asyncio.create_task(self._reminder_loop())
         logger.info("[简报] 插件初始化完成，定时任务已启动。")
 
     async def terminate(self):
         self._stop_event.set()
-        for task in (self._scheduler_task, self._catchup_task):
+        for task in (self._scheduler_task, self._catchup_task,
+                     getattr(self, "_reminder_task", None)):
             if task and not task.done():
                 task.cancel()
                 try:
@@ -227,6 +230,46 @@ class CquDailyDigestPlugin(
         text = str(getattr(event, "message_str", "") or "")
         name = str(self.config.get("bot_name", "") or "").strip()
         return bool(name) and name in text
+
+    # ── 私聊：手工录入与转发 ────────────────────────────────────
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE)
+    async def on_private_message(self, event: AstrMessageEvent):
+        """管理员私聊：带 /b、带引用、带图片才处理；纯文本闲聊放行给 AI。
+
+        ★ 为什么不能无条件接管私聊：管理员同时也是用户，他私聊机器人
+          聊天是正常需求。只有这几种「明显是要录入/转发」的形态才拦，
+          其余一律不碰，交给 AstrBot 的对话链路。
+        """
+        if not self._cfg_bool("broadcast_enabled", False):
+            return
+        if not self._manual_allowed(event):
+            return
+
+        raw = self._text_of(event)
+        stripped = raw
+        for prefix in ("/b", "／b", "#b"):
+            if raw.startswith(prefix):
+                stripped = raw[len(prefix):].strip()
+                break
+        prefixed = stripped != raw
+        has_reply = bool(self._reply_id(event))
+        has_image = bool(self._images_of(event))
+
+        if not (prefixed or has_reply or has_image):
+            return          # 纯文本闲聊，交给正常对话
+
+        try:
+            note = await self.handle_manual(
+                event, text_override=stripped if prefixed else None
+            )
+            if note:
+                yield event.plain_result(note)
+        except Exception as exc:                        # noqa: BLE001
+            logger.warning(f"[简报] 手工消息处理失败：{exc}")
+            yield event.plain_result(f"处理失败了：{exc}")
+        finally:
+            event.stop_event()
 
     # ── 指令 ────────────────────────────────────────────────────
     #

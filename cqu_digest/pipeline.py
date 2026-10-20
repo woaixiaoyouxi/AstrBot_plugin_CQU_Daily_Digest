@@ -93,7 +93,15 @@ class PipelineMixin:
         test 不传这个（它要全程不过库）。
         """
         categories = self._enabled_categories()
-        notices = await self._fetcher.fetch_notices(categories=categories) if categories else []
+        # ★ 抓取总开关：关掉之后一个网页都不抓，只用条目库和群消息。
+        #   这样认证失效、或者不想让它白耗资源时，其余流程（手工录入、
+        #   群消息、推送）照常可用。
+        if self._cfg_bool("fetch_enabled", True) and categories:
+            notices = await self._fetcher.fetch_notices(categories=categories)
+        else:
+            notices = []
+            if not self._cfg_bool("fetch_enabled", True):
+                logger.info("[简报] 抓取开关关着，本轮只用条目库和群消息")
 
         seen = await self._store.get_seen_ids()
 

@@ -219,6 +219,10 @@ def is_valid(record: dict, today: str, no_due_expire_days: int = 30) -> bool:
     """
     if not isinstance(record, dict):
         return False
+    # 手工「结」过的通知：不再进简报、也不再进到期提醒。
+    # 记录本身留在库里（有链路可查），只是不再呈现。
+    if record.get("closed"):
+        return False
     due = str(record.get("due", "") or "")
     if due:
         return due >= str(today)
@@ -279,6 +283,14 @@ def split_entries(text: str) -> list:
         if cur is None:
             continue
         cur["block"].append(line)
+
+        # 图片行必须在 split_field 之前拦下：它不在 FIELDS 里，
+        # 交下去会被当成普通正文行丢掉，库里就永远没有 images。
+        if s.startswith("图片："):
+            url = s[3:].strip()
+            if url:
+                cur.setdefault("images", []).append(url)
+            continue
 
         parsed = split_field(s)
         if parsed is None:
@@ -344,6 +356,11 @@ def entry_block_text(record: dict) -> str:
         value = fields.get(name)
         if value:
             lines.append(name + "：" + str(value))
+    # 图片放最后。只写地址 —— 库里不存文件，怎么呈现交给发送层决定。
+    for url in record.get("images") or []:
+        text = str(url or "").strip()
+        if text:
+            lines.append("图片：" + text)
     return chr(10).join(lines)
 
 

@@ -149,6 +149,12 @@
                 "type": "string",
                 "default": "",
                 "hint": "填一个 JSON 数组，每项是一个源。parser 用字符串：parse_title_attr / parse_text_content / child_text:<选择器>。key 和内置源重复时会覆盖内置。格式错了会被忽略，并在日志里报错"
+            },
+            "fetch_enabled": {
+                "description": "抓取总开关",
+                "type": "bool",
+                "default": true,
+                "hint": "关掉 = 不再抓校内网和竞赛页面（定时推送和 /digest 都不发请求）。条目库、去重基线、群消息缓冲全部保留；手工录入和转发也不受影响。认证失效或想省资源时用它"
             }
         }
     },
@@ -302,6 +308,53 @@
                 "type": "int",
                 "default": 30,
                 "hint": "没截止日的条目过了这么多天就不再算「未过期」，/digest all 里不再出现，也会从条目库里清掉。有截止日的按截止日算"
+            }
+        }
+    },
+    "转发": {
+        "description": "管理员私聊 -> 分发到群",
+        "type": "object",
+        "items": {
+            "broadcast_enabled": {
+                "description": "启用转发",
+                "type": "bool",
+                "default": false,
+                "hint": "开着时，管理员私聊发带 /b 的消息、引用一条消息、或直接发图片，内容会被录入条目库并转发到下面列出的群"
+            },
+            "broadcast_groups": {
+                "description": "目标群号",
+                "type": "list",
+                "default": [],
+                "hint": "每项一个群号。转发会按顺序发，每个群之间停 3 秒防风控"
+            },
+            "broadcast_admin_qq": {
+                "description": "允许使用的 QQ 号",
+                "type": "list",
+                "default": [],
+                "hint": "留空 = 沿用 command_allow_from 那份管理员名单"
+            }
+        }
+    },
+    "采集提醒": {
+        "description": "每天提醒你去手工采集",
+        "type": "object",
+        "items": {
+            "collect_reminder_enabled": {
+                "description": "启用采集提醒",
+                "type": "bool",
+                "default": false,
+                "hint": "到点给管理员发一句「该去采集了」"
+            },
+            "collect_reminder_time": {
+                "description": "提醒时间（HH:MM）",
+                "type": "string",
+                "default": "08:30"
+            },
+            "collect_reminder_targets": {
+                "description": "提醒发到哪个会话",
+                "type": "list",
+                "default": [],
+                "hint": "留空 = 用 push_targets 里的私聊会话。格式同 push_targets"
             }
         }
     }

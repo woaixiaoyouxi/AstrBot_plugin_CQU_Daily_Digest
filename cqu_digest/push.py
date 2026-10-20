@@ -166,9 +166,33 @@ class PushMixin:
                     line for line in body.split(chr(10))
                     if block_utils.block_ref_of(line) is None
                 ).strip()
-                nodes.append(Node(content=[Plain(cleaned or body)], name=name, uin=use_uin))
+                nodes.append(Node(
+                    content=self._node_content(cleaned, name, Image, Plain),
+                    name=name, uin=use_uin,
+                ))
         logger.info(f"[简报] 合并转发：{len(nodes)} 个节点，uin={use_uin}")
         return MessageChain([Nodes(nodes)])
+
+    @staticmethod
+    def _node_content(body: str, fallback: str, Image, Plain) -> list:
+        """把一段正文按行转成节点内容，图片行变成真正的 Image 组件。
+
+        纯文本降级路径不经过这里 —— 那边只能显示成「图片：地址」文字，
+        这是平台限制。
+        """
+        content = []
+        for line in body.split(chr(10)):
+            text = line.strip()
+            if text.startswith("图片："):
+                url = text[3:].strip()
+                if url:
+                    try:
+                        content.append(Image(file=url))
+                        continue
+                    except Exception:  # noqa: BLE001
+                        pass
+            content.append(Plain(line))
+        return content or [Plain(fallback)]
 
     def _make_block_node(self, block_no: int, blocks: list, uin: str,
                          Node, Plain, Image):

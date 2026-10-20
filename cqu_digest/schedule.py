@@ -48,4 +48,63 @@ class ScheduleMixin:
             target += timedelta(days=1)
         return max(1.0, (target - now).total_seconds())
 
+    # ── 采集提醒 ────────────────────────────────────────────────
+
+    def _reminder_time(self) -> tuple[int, int]:
+        raw = str(self.config.get("collect_reminder_time", "08:30") or "08:30").strip()
+        raw = raw.replace("：", ":").replace("　", "").replace("．", ".")
+        head, _, tail = raw.partition(":")
+        try:
+            hour, minute = int(head), int(tail)
+        except ValueError:
+            return 8, 30
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            return hour, minute
+        return 8, 30
+
+    def _seconds_until_reminder(self) -> float:
+        now = datetime.now(CHINA_TZ)
+        hour, minute = self._reminder_time()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return max(1.0, (target - now).total_seconds())
+
+    async def _reminder_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=self._seconds_until_reminder()
+                )
+                return
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self._send_collect_reminder()
+            except Exception as exc:                        # noqa: BLE001
+                logger.error(f"[简报] 采集提醒发送失败：{exc}")
+
+    async def _send_collect_reminder(self):
+        """到点了给管理员发一句「该去采集了」。"""
+        if not self._cfg_bool("collect_reminder_enabled", False):
+            return
+        targets = self._cfg_list("collect_reminder_targets", [])
+        if not targets:
+            # 没单独配就退到 push_targets 里的私聊会话
+            targets = [t for t in self._push_targets() if ":FriendMessage:" in t]
+        if not targets:
+            logger.warning(
+                "[简报] 采集提醒没地方发：collect_reminder_targets 空，"
+                "push_targets 里也没有私聊会话"
+            )
+            return
+        text = ("该去采集今天的消息了。\n"
+                "把通知转发给我（文字或截图），我录进简报并分发到指定的群。")
+        for umo in targets:
+            try:
+                await self.context.send_message(umo, MessageChain().message(text))
+                logger.info(f"[简报] 已发采集提醒到 {umo}")
+            except Exception as exc:                        # noqa: BLE001
+                logger.warning(f"[简报] 采集提醒发到 {umo} 失败：{exc}")
+
     # ── 主流水线 ────────────────────────────────────────────────
