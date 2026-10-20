@@ -248,13 +248,28 @@ class CquDailyDigestPlugin(
 
         raw = self._text_of(event)
         stripped = raw
-        for prefix in ("/b", "／b", "#b"):
+        command = ""
+        for prefix in ("/b", "／b", "#b", "/f", "／f"):
             if raw.startswith(prefix):
                 stripped = raw[len(prefix):].strip()
+                command = prefix[-1]
                 break
         prefixed = stripped != raw
         has_reply = bool(self._reply_id(event))
         has_image = bool(self._images_of(event))
+
+        # /f 只转发最近录入的那条，不需要引用也不需要配图
+        if command == "f":
+            try:
+                note = await self.forward_last(event)
+                if note:
+                    yield event.plain_result(note)
+            except Exception as exc:                    # noqa: BLE001
+                logger.warning(f"[简报] 转发失败：{exc}")
+                yield event.plain_result(f"转发失败：{exc}")
+            finally:
+                event.stop_event()
+            return
 
         if not (prefixed or has_reply or has_image):
             return          # 纯文本闲聊，交给正常对话

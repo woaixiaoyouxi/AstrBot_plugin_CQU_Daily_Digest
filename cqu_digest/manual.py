@@ -21,13 +21,16 @@ from astrbot.api import logger
 from astrbot.api.event import MessageChain
 
 from cqu_digest.base import CHINA_TZ
-from cqu_digest.digest.entries import split_entries, to_records
+from cqu_digest.digest.entries import entry_block_text, split_entries, to_records
 
 KEY_MSG_LINKS = "manual_msg_links"
 """{消息 id: 通知 id}。管理员引用一条消息说「结」时，靠它把两边对上。
 
 存成 dict 而不是两个平行 list：查的时候只要一次 get，不用每次对齐索引。
 """
+
+KEY_LAST_MANUAL = "manual_last_id"
+"""最近一次手工录入的通知 id。/f 转发它，不用你再指一次是哪条。"""
 
 BROADCAST_GAP_SECONDS = 3
 """发到下一个群之间等几秒。连续秒发容易被 QQ 判定成异常。"""
@@ -211,14 +214,33 @@ class ManualMixin:
         if msg_id:
             await self._set_link(msg_id, record["id"])
 
-        forwarded = await self._broadcast(event, text, images)
-        head = f"已录入「{record['title']}」"
-        if forwarded:
-            head += f"，转发到 {forwarded} 个群"
+        # 只入库，不自动转发 —— 转不转发由你发 /f 决定，中间留一道确认。
+        await self._set_last_manual(record["id"])
+        head = f"已录入「{record['title']}」。确认没问题就发 /f 转发到群。"
         if not msg_id:
-            head += ("（拿不到消息 id，下次引用这条说「结」可能对不上，"
+            head += ("（拿不到消息 id，以后引用这条说「结」可能对不上，"
                      "到时候直接说标题也行）")
         return head
+
+    async def forward_last(self, event: Any) -> str:
+        """把最近一条手工录入的通知转发到目标群。
+
+        和入库分开是有意的：录入是「我收到了」，转发是「我确认要发出去」。
+        合成一步的话，模型整理错了内容就直接进了群，收不回来。
+        """
+        last_id = await self._get_last_manual()
+        if not last_id:
+            return "还没有手工录入的通知，先发 /b 录入一条。"
+        entries = await self._store.get_entries()
+        record = entries.get(last_id)
+        if not record:
+            return "最近那条已经不在库里了（可能过期被清），重新 /b 录入一条吧。"
+        formatted = entry_block_text(record)
+        images = [{"url": url, "file": url} for url in (record.get("images") or [])]
+        forwarded = await self._broadcast(event, formatted, images)
+        if forwarded:
+            return f"已转发到 {forwarded} 个群。"
+        return "没发出去。检查一下转发开关和目标群号填了没有。"
 
     def _current_msg_id(self, event: Any) -> str:
         obj = getattr(event, "message_obj", None)
@@ -348,3 +370,12 @@ class ManualMixin:
         if len(links) > 300:
             links = dict(list(links.items())[-300:])
         await self.put_kv_data(KEY_MSG_LINKS, links)
+
+    # ── 最近一条手工录入 ────────────────────────────────────────
+
+    async def _get_last_manual(self) -> str:
+        value = await self.get_kv_data(KEY_LAST_MANUAL, "")
+        return str(value or "")
+
+    async def _set_last_manual(self, notice_id: str) -> None:
+        await self.put_kv_data(KEY_LAST_MANUAL, notice_id)
