@@ -138,12 +138,6 @@
                 "default": false,
                 "hint": "竞赛页正文往往很长，开启会明显拖慢速度"
             },
-            "atrust_cookie": {
-                "description": "aTrust 校外访问凭证（Cookie）",
-                "type": "string",
-                "default": "",
-                "hint": "校外部署时填。浏览器登录 https://sso.cqu.edu.cn/login?service=https://atrust.cqu.edu.cn:443/passport/v1/auth/cas?sfDomain=CAS 后，F12 → 应用 → Cookies → 复制 sdp_user_token 的值，格式 sdp_user_token=<值>。留空 = 校园网内直连；填了 = 自动改用 aTrust 代理地址。会话过期需重新获取"
-            },
             "custom_sources": {
                 "description": "自定义信息源（JSON）",
                 "type": "string",

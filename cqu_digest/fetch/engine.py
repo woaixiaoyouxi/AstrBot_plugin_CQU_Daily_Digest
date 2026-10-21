@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup, Tag
 from astrbot.api import logger
 
 from cqu_digest.base import CHINA_TZ, Notice
-from cqu_digest.fetch.sources import SourceConfig, atrust_url, load_sources
+from cqu_digest.fetch.sources import SourceConfig, load_sources
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -44,8 +44,6 @@ EXCERPT_LIMIT = 500
 class NoticeFetcher:
     def __init__(self, config: dict[str, Any] | None = None):
         self.config = config or {}
-        # aTrust 校外访问凭证。填了就自动把校内 URL 换成代理地址、并带上 Cookie
-        self.atrust_cookie = str(self.config.get("atrust_cookie", "") or "").strip()
         # 内置源 + custom_sources 合并后的结果
         self.sources, self.sources_by_key = load_sources(
             str(self.config.get("custom_sources", "") or "")
@@ -103,8 +101,8 @@ class NoticeFetcher:
     async def _fetch_source_notices(
         self, client: httpx.AsyncClient, source: SourceConfig
     ) -> list[Notice]:
-        page_urls = [atrust_url(str(source["url"]))]
-        page_urls += [atrust_url(u) for u in source.get("extra_urls", [])]
+        page_urls = [str(source["url"])]
+        page_urls += list(source.get("extra_urls", []))
         notices: list[Notice] = []
         seen_links: set[str] = set()
 
@@ -208,7 +206,6 @@ class NoticeFetcher:
         """
         if not url:
             return ""
-        url = atrust_url(url)  # 校外走代理
         try:
             if client is not None:
                 response = await client.get(url)
@@ -304,10 +301,8 @@ class NoticeFetcher:
         return f"{source_key}:{digest}"
 
     def _base_headers(self) -> dict[str, str]:
-        """默认请求头 + aTrust cookie（配了才带）。"""
+        """默认请求头。"""
         headers = dict(DEFAULT_HEADERS)
-        if self.atrust_cookie:
-            headers["Cookie"] = self.atrust_cookie
         return headers
 
     def _request_headers(self, source: SourceConfig, request_url: str | None = None) -> dict[str, str]:

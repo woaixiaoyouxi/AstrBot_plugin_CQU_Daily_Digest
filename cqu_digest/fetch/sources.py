@@ -119,26 +119,6 @@ SOURCES: list[SourceConfig] = [
 ]
 
 
-# ── aTrust 代理 ────────────────────────────────────────────────
-# 校外访问校内站时，把 URL 换成 aTrust 的反向代理地址。
-# 公式见 https://cqulug.club/wiki/atrust/ ：
-#   主机名里的 . 换成 -，HTTPS 再加 -s 后缀，拼 .atrust.cqu.edu.cn
-# 例：www.cqu.edu.cn  ->  www-cqu-edu-cn-s.atrust.cqu.edu.cn
-ATRUST_MAP: dict[str, str] = {
-    "www.cqu.edu.cn": "www-cqu-edu-cn-s.atrust.cqu.edu.cn",
-    "sxic.cqu.edu.cn": "sxic-cqu-edu-cn-s.atrust.cqu.edu.cn",
-}
-
-
-def atrust_url(url: str) -> str:
-    """把校内 URL 换成 aTrust 代理地址；没有对应映射就原样返回。"""
-    for origin, proxy in ATRUST_MAP.items():
-        prefix = f"https://{origin}"
-        if url.startswith(prefix):
-            return f"https://{proxy}" + url[len(prefix):]
-    return url
-
-
 # ── 自定义源 ────────────────────────────────────────────────────
 def parse_custom_sources(raw: str) -> list[SourceConfig]:
     """把配置里的 custom_sources（JSON 字符串）解析成源列表。
